@@ -1,17 +1,17 @@
 // Caches the whole app so it runs with no connection.
 // Bump VERSION whenever any app file changes so phones pick up the update.
-const VERSION = 'site-defects-v1.0.0';
+const VERSION = 'site-defects-v1.0.1';
 const FILES = [
   './',
   'index.html',
   'app.css',
   'app.js',
   'manifest.webmanifest',
-  'vendor/xlsx.full.min.js',
-  'vendor/jszip.min.js',
-  'icons/icon-192.png',
-  'icons/icon-512.png',
-  'icons/apple-touch-icon.png',
+  'xlsx.full.min.js',
+  'jszip.min.js',
+  'icon-192.png',
+  'icon-512.png',
+  'apple-touch-icon.png',
 ];
 
 self.addEventListener('install', e => {
