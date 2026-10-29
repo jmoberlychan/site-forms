@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.3.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -94,8 +94,42 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 function defectsFor(component) { return S.project.defects.filter(d => d.component === component); }
 function defectById(id) { return S.project.defects.find(d => d.id === id); }
 function photoPath(p) { return 'Photos/' + safeName(p.unit) + '/' + safeName(p.component) + '/' + p.name; }
-function genericOrigName(t) { const d = new Date(t); return `IMG_${dateKey(t)}_${pad(d.getHours(), 2)}${pad(d.getMinutes(), 2)}${pad(d.getSeconds(), 2)}.jpg`; }
-function origNameOf(p) { return p.origName || genericOrigName(p.takenAt); }
+function genericOrigName(t, ext = 'jpg') { const d = new Date(t); return `${ext === 'jpg' ? 'IMG' : 'VID'}_${dateKey(t)}_${pad(d.getHours(), 2)}${pad(d.getMinutes(), 2)}${pad(d.getSeconds(), 2)}.${ext}`; }
+function origNameOf(p) { return p.origName || genericOrigName(p.takenAt, p.ext || 'jpg'); }
+const isVideo = p => p && p.kind === 'video';
+function isVideoFile(f) { return /^video\//.test(f.type || '') || /\.(mov|mp4|m4v|3gp|webm)$/i.test(f.name || ''); }
+function videoExt(f) {
+  const m = String(f.name || '').match(/\.(mov|mp4|m4v|3gp|webm)$/i); if (m) return m[1].toLowerCase();
+  return /quicktime/.test(f.type) ? 'mov' : /webm/.test(f.type) ? 'webm' : 'mp4';
+}
+// Grab a still frame from a video for its thumbnail. Falls back to a plain play-icon tile.
+function videoThumb(f) {
+  return new Promise(res => {
+    const u = URL.createObjectURL(f); const v = document.createElement('video');
+    let done = false;
+    const finish = blob => { if (done) return; done = true; v.removeAttribute('src'); v.load(); URL.revokeObjectURL(u); res(blob); };
+    const fallback = () => {
+      const c = document.createElement('canvas'); c.width = 320; c.height = 240; const g = c.getContext('2d');
+      g.fillStyle = '#15201C'; g.fillRect(0, 0, 320, 240); g.fillStyle = '#FFD60A';
+      g.beginPath(); g.moveTo(135, 85); g.lineTo(195, 120); g.lineTo(135, 155); g.closePath(); g.fill();
+      c.toBlob(b => finish(b), 'image/jpeg', 0.7);
+    };
+    const t = setTimeout(fallback, 5000);
+    v.muted = true; v.playsInline = true; v.preload = 'auto'; v.setAttribute('playsinline', '');
+    v.onloadeddata = () => { try { v.currentTime = Math.min(0.5, (v.duration || 1) / 2); } catch (_) { clearTimeout(t); fallback(); } };
+    v.onseeked = () => {
+      clearTimeout(t);
+      try {
+        const w = v.videoWidth, h = v.videoHeight; if (!w || !h) { fallback(); return; }
+        const sc = Math.min(1, 320 / Math.max(w, h)); const c = document.createElement('canvas');
+        c.width = Math.round(w * sc); c.height = Math.round(h * sc); c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+        c.toBlob(b => b ? finish(b) : fallback(), 'image/jpeg', 0.7);
+      } catch (_) { fallback(); }
+    };
+    v.onerror = () => { clearTimeout(t); fallback(); };
+    v.src = u;
+  });
+}
 function hasBlob(p) { return !p.removed; }
 // Units in working order: scheduled units first (by schedule), then everything else in list order.
 function unitsInOrder() {
@@ -326,22 +360,29 @@ async function addPhotos(files, linkDefectId) {
     const f = list[i];
     if (list.length > 1) busy(`Saving photo ${i + 1} of ${list.length}…`);
     try {
-      const img = await loadImg(f);
-      let full = f;
-      if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) full = await canvasBlob(img, S.settings.photoMax, 0.88);
-      const thumb = await canvasBlob(img, 320, 0.7);
+      const vid = isVideoFile(f);
+      const ext = vid ? videoExt(f) : 'jpg';
+      let full = f, thumb;
+      if (vid) {
+        if (list.length === 1) busy('Saving video…');
+        thumb = await videoThumb(f); // videos are kept exactly as recorded
+      } else {
+        const img = await loadImg(f);
+        if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) full = await canvasBlob(img, S.settings.photoMax, 0.88);
+        thumb = await canvasBlob(img, 320, 0.7);
+      }
       const takenAt = Date.now();
       const dk = dateKey(takenAt);
       const seq = await nextSeq(initials, dk);
-      const name = `${safeName(S.project.number)}_${safeName(initials)}_${dk}_${pad(seq, 4)}.jpg`;
+      const name = `${safeName(S.project.number)}_${safeName(initials)}_${dk}_${pad(seq, 4)}.${ext}`;
       // Original name: the camera/library file name when there is a real one, otherwise a camera-style IMG_ name.
       let orig = String(f.name || '').trim();
-      if (!orig || /^(image|photo|img|capture)(\s*\(\d+\))?\.\w+$/i.test(orig)) orig = genericOrigName(takenAt);
-      orig = safeName(orig.replace(/\.(heic|heif|png|jpeg)$/i, '.jpg'));
-      if (!/\.jpg$/i.test(orig)) orig += '.jpg';
+      if (!orig || /^(image|photo|img|capture|video|trim\.[\w-]+)(\s*\(\d+\))?\.\w+$/i.test(orig)) orig = genericOrigName(takenAt, ext);
+      orig = vid ? safeName(orig.replace(/\.\w+$/, '') + '.' + ext) : safeName(orig.replace(/\.(heic|heif|png|jpeg)$/i, '.jpg'));
+      if (!new RegExp('\\.' + ext + '$', 'i').test(orig)) orig += '.' + ext;
       const taken = new Set(S.photos.map(origNameOf));
-      if (taken.has(orig)) { const base = orig.replace(/\.jpg$/i, ''); let k = 2; while (taken.has(`${base}_${k}.jpg`)) k++; orig = `${base}_${k}.jpg`; }
-      const meta = { id: uid(), projectId: S.project.id, name, origName: orig, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exp: { r: null, o: null } };
+      if (taken.has(orig)) { const base = orig.replace(/\.\w+$/, ''); let k = 2; while (taken.has(`${base}_${k}.${ext}`)) k++; orig = `${base}_${k}.${ext}`; }
+      const meta = { id: uid(), projectId: S.project.id, kind: vid ? 'video' : 'photo', ext, name, origName: orig, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exp: { r: null, o: null } };
       const d = await db(); const t = d.transaction(['photos', 'blobs', 'thumbs'], 'readwrite');
       t.objectStore('photos').put(meta); t.objectStore('blobs').put(full, meta.id); t.objectStore('thumbs').put(thumb, meta.id);
       await txDone(t);
@@ -414,7 +455,7 @@ function hydrateThumbs(root) {
 function thumbHTML(p, opts = {}) {
   const sel = opts.selectable && S.selecting.has(p.id);
   return `<button class="thumb${sel ? ' sel' : ''}" data-photo="${p.id}" aria-label="Photo ${esc(p.name)}">
-    <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}</button>`;
+    <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}</button>`;
 }
 function photoById(id) { return S.photos.find(p => p.id === id); }
 function trayPhotos() { const { unit, component } = ctx(); return S.photos.filter(p => p.unit === unit && p.component === component && !p.defectIds.length); }
@@ -805,8 +846,8 @@ async function viewPhoto(id) {
   const tsrc = url ? '' : await thumbSrc(id);
   const comp = p.component; const ds = defectsFor(comp);
   const draw = el => {
-    $('.sheet-body', el).innerHTML = `<img class="viewer-img" src="${url || tsrc}" alt="">
-      ${url ? '' : '<p class="note">Full-size photo was exported and removed from this phone to free space. This is the thumbnail.</p>'}
+    $('.sheet-body', el).innerHTML = `${isVideo(p) && url ? `<video class="viewer-img" src="${url}" controls playsinline preload="metadata"></video>` : `<img class="viewer-img" src="${url || tsrc}" alt="">`}
+      ${url ? '' : '<p class="note">The full-size file was exported and removed from this phone to free space. This is the thumbnail.</p>'}
       <div class="fname">${esc(p.name)}</div>
       <div class="path">Original: ${esc(origNameOf(p))}</div>
       <div class="path">${esc(photoPath(p))} · ${fmtTime(p.takenAt)} · ${mb(p.size || 0)}</div>
@@ -1006,7 +1047,7 @@ function openMenu() {
     title: 'Menu',
     body: `<ul class="list">
       <li><button id="m-proj"><span>Projects<span class="sub">${S.projects.length} on this phone · switch, import, update lists</span></span><span class="meta">›</span></button></li>
-      <li><button id="m-lib"><span>Add photos from library<span class="sub">Import photos you took with the Camera app into ${esc(S.project.state.unit || 'the current unit')}</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-lib"><span>Add photos &amp; videos from library<span class="sub">Import photos or videos you took with the Camera app into ${esc(S.project.state.unit || 'the current unit')}</span></span><span class="meta">›</span></button></li>
       <li><button id="m-lists"><span>Edit lists<span class="sub">Add units, components and conditions · delete ones added on site</span></span><span class="meta">›</span></button></li>
       <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
       <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
@@ -1063,7 +1104,7 @@ async function openSettings() {
     body: `<div class="field"><label for="s-ini">Your initials</label><input id="s-ini" value="${esc(S.settings.initials)}" maxlength="5" autocapitalize="characters"><span class="hint">Used in new photo names. Existing photos keep their names.</span></div>
       <div class="field"><label for="s-max">Photo size</label><select id="s-max">
         <option value="0">Full resolution (largest files)</option><option value="3000">Large · 3000 px</option><option value="2000">Medium · 2000 px (about ¼ the storage)</option></select>
-        <span class="hint">Applies to new photos, to both the original and the renamed copy. The phone stores each photo once; the two copies are made when you export.</span></div>
+        <span class="hint">Applies to new photos (videos are always kept as recorded), to both the original and the renamed copy. The phone stores each photo once; the two copies are made when you export.</span></div>
       <div class="field"><label for="s-part">Export part size</label><select id="s-part">
         <option value="150">150 MB per ZIP</option><option value="250">250 MB per ZIP</option><option value="500">500 MB per ZIP</option></select>
         <span class="hint">Large photo exports are split into parts so the phone doesn’t run out of memory.</span></div>
@@ -1212,16 +1253,16 @@ function buildWorkbook() {
   orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
 
   /* --- Photo log --- */
-  const pRows = [['Photo', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder']];
+  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder']];
   const sortedPh = [...S.photos].sort((a, b) => a.takenAt - b.takenAt);
   for (const ph of sortedPh) {
     const ds = ph.defectIds.map(defectById).filter(Boolean);
-    pRows.push([hyperlink(ph.name, photoPath(ph)), origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
+    pRows.push([hyperlink(ph.name, photoPath(ph)), isVideo(ph) ? 'Video' : 'Photo', origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
       ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, '')]);
   }
   const wsP = XLSX.utils.aoa_to_sheet(pRows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsP['!cols'] = [{ wch: 30 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }];
-  wsP['!autofilter'] = { ref: `A1:I${Math.max(pRows.length, 2)}` };
+  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }];
+  wsP['!autofilter'] = { ref: `A1:J${Math.max(pRows.length, 2)}` };
 
   /* --- About --- */
   const info = [
@@ -1234,7 +1275,7 @@ function buildWorkbook() {
     ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
     ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
     ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component.'],
-    ['Originals folder', 'The same photos under their original file names, unsorted. The Photo Log matches each original to its renamed copy.'],
+    ['Unsorted folder', 'Every photo in one place, not sorted by unit: “Original names” has the photos under their original file names, “Renamed” has the same photos under their new names. The Photo Log matches each original to its renamed copy.'],
     ['Schedule', 'Units marked in the Schedule column of the Unit Matrix were on the visit schedule from the import file.'],
     ['Added on site', 'Units and conditions marked “added on site” were added in the app rather than coming from the import file.'],
     ['Results', '1 = defective, 0 = not defective, NA = condition doesn’t exist at the unit, NR = not able to be recorded.'],
@@ -1253,7 +1294,8 @@ function workbookBlob() {
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
-const COPY_LABEL = { r: 'renamed', o: 'original', b: 'renamed + original' };
+const COPY_LABEL = { r: 'sorted, renamed', o: 'unsorted, original names + renamed', b: 'sorted + unsorted' };
+const COPY_MULT = { r: 1, o: 2, b: 3 };
 function needsExport(ph, copies) { return copies === 'r' ? !ph.exp.r : copies === 'o' ? !ph.exp.o : (!ph.exp.r || !ph.exp.o); }
 function openExport() {
   if (!S.project) return;
@@ -1272,18 +1314,18 @@ function openExport() {
       ${missing ? `<p class="warn">${missing} defective condition${missing > 1 ? 's have' : ' has'} no photo linked.</p>` : ''}
       <div class="section-h">What to export</div>${seg('what', [['both', 'Spreadsheet + photos'], ['photos', 'Photos only'], ['xls', 'Spreadsheet only']])}
       <div id="x-photo-opts">
-        <div class="section-h">Which copies</div>${seg('copies', [['r', 'Renamed'], ['o', 'Originals'], ['b', 'Both']])}
+        <div class="section-h">Which copies</div>${seg('copies', [['r', 'Sorted'], ['o', 'Unsorted'], ['b', 'Both']])}
         <div class="section-h">Which photos</div>${seg('scope', [['new', 'Not yet exported'], ['all', 'All on phone']])}
       </div>
       <p class="note" id="x-sum" style="margin-top:12px"></p>
-      <p class="note">Renamed copies are sorted into <b>Photos / Unit / Component</b>. Originals go, unsorted, into an <b>Originals</b> folder under their original file names. The spreadsheet sits beside them, so its photo links open directly.</p>`,
+      <p class="note"><b>Sorted:</b> renamed photos in <b>Photos / Unit / Component</b>. <b>Unsorted:</b> every photo in one <b>Unsorted</b> folder, with two sub-folders, <b>Original names</b> and <b>Renamed</b>. The spreadsheet sits beside them, so its photo links open directly.</p>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="x-go">Export</button>`,
     mount(el, close) {
       const pick = () => opt.what === 'xls' ? [] : onPhone.filter(ph => opt.scope === 'all' || needsExport(ph, opt.copies));
       const draw = () => {
         el.querySelectorAll('[data-seg]').forEach(b => b.setAttribute('aria-checked', opt[b.dataset.seg] === b.dataset.v));
         $('#x-photo-opts', el).hidden = opt.what === 'xls';
-        const ps = pick(); const bytes = ps.reduce((s, p) => s + (p.size || 0), 0) * (opt.copies === 'b' ? 2 : 1);
+        const ps = pick(); const bytes = ps.reduce((s, p) => s + (p.size || 0), 0) * COPY_MULT[opt.copies];
         $('#x-sum', el).innerHTML = opt.what === 'xls' ? 'One Excel file.'
           : `<b>${ps.length} photo${ps.length === 1 ? '' : 's'}</b> (${COPY_LABEL[opt.copies]}) · about ${mb(bytes)}${bytes > (S.settings.partMB || 250) * 1048576 ? ` · split into ${Math.ceil(bytes / ((S.settings.partMB || 250) * 1048576))}+ ZIP parts` : ''}`;
         $('#x-go', el).disabled = opt.what === 'photos' && !ps.length;
@@ -1312,7 +1354,7 @@ async function exportRun({ photos, copies, withXls }) {
     if (!photos.length) { shareStep([{ file: new File([xblob], xname, { type: xblob.type }), photos: [] }]); return; }
   }
   // split into parts by size so the phone doesn't run out of memory
-  const mult = copies === 'b' ? 2 : 1;
+  const mult = COPY_MULT[copies];
   const limit = (S.settings.partMB || 250) * 1048576;
   const parts = []; let cur = [], curSize = 0;
   for (const ph of [...photos].sort((a, b) => a.takenAt - b.takenAt)) {
@@ -1322,7 +1364,7 @@ async function exportRun({ photos, copies, withXls }) {
   }
   if (cur.length) parts.push(cur);
   const root = `${safeName(p.number)} Inspection`;
-  const kind = withXls ? 'Export' : (copies === 'o' ? 'Originals' : copies === 'b' ? 'Photos' : 'Renamed');
+  const kind = withXls ? 'Export' : (copies === 'o' ? 'Unsorted' : copies === 'b' ? 'Photos' : 'Sorted');
   const jobs = parts.map((ph, i) => ({ photos: ph, idx: i, total: parts.length,
     name: `${safeName(p.number)}_${kind}_${st}${parts.length > 1 ? `_part${i + 1}of${parts.length}` : ''}.zip` }));
   shareStep(jobs.map(j => ({ lazy: async () => {
@@ -1335,7 +1377,10 @@ async function exportRun({ photos, copies, withXls }) {
       if (b) {
         const date = new Date(ph.takenAt);
         if (copies !== 'o') f.file(photoPath(ph), b, { binary: true, date });
-        if (copies !== 'r') f.file('Originals/' + origNameOf(ph), b, { binary: true, date });
+        if (copies !== 'r') {
+          f.file('Unsorted/Original names/' + origNameOf(ph), b, { binary: true, date });
+          f.file('Unsorted/Renamed/' + ph.name, b, { binary: true, date });
+        }
       }
       if (k % 20 === 0) busy(`Packing ${pre}${k + 1}/${j.photos.length} photos…`);
     }

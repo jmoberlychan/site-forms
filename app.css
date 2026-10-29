@@ -243,3 +243,8 @@ main { padding-bottom: calc(150px + var(--safe-b)); }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 600; margin: 4px 0 12px; min-height: 40px; }
 .check input { width: 22px; height: 22px; }
 .link-row .sub { display: block; color: var(--muted); font-size: 14px; font-weight: 400; }
+.thumb .play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(0,0,0,.6); color: #fff; font-size: 13px; line-height: 30px; text-align: center; padding-left: 2px;
+}
+video.viewer-img { width: 100%; }
