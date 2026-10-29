@@ -421,3 +421,5 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 .cam-dial { bottom: var(--lift, 0px); }
 /* v1.5.0: unlinked photos grouped by the component they were taken under */
 .tray-h { font-size: 13px; font-weight: 700; color: var(--muted); margin: 12px 0 6px; }
+/* v1.5.1: four buttons in the Unlinked window sit in a tidy 2 × 2 grid */
+.sheet-foot:has(#t-move) { display: grid; grid-template-columns: 1fr 1fr; }

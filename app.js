@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -1582,12 +1582,13 @@ function openTray() {
   const draw = (el) => {
     const ps = trayPhotos();
     $('.sheet-body', el).innerHTML = ps.length
-      ? `<p class="note">Unlinked photos at unit <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. The rest stay at this unit.</p>
+      ? `<p class="note">Unlinked photos at unit <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. Taken at the wrong unit? Select them and tap <b>Move</b>.</p>
          ${trayGroupsHTML(ps, p => thumbHTML(p, { selectable: true, badge: '#' + p.seq }))}`
       : `<div class="empty"><h2>No unlinked photos</h2>Photos taken with the big camera button land here until you link them.</div>`;
     const n = S.selecting.size;
     $('.sheet-foot', el).innerHTML = `<button class="btn ghost" id="t-del" ${n ? '' : 'disabled'}>Delete${n ? ' ' + n : ''}</button>
       <button class="btn ghost" id="t-all" ${ps.length ? '' : 'disabled'}>${n === ps.length && n ? 'Clear' : 'Select all'}</button>
+      <button class="btn ghost" id="t-move" ${n ? '' : 'disabled'}>Move${n ? ' ' + n : ''}…</button>
       <button class="btn" id="t-link" ${n ? '' : 'disabled'}>Link${n ? ' ' + n : ''}…</button>`;
     hydrateThumbs(el);
   };
@@ -1600,6 +1601,14 @@ function openTray() {
         if (t && el.contains(t)) { const id = t.dataset.photo; S.selecting.has(id) ? S.selecting.delete(id) : S.selecting.add(id); draw(el); return; }
         if (e.target.id === 't-all') { const ps = trayPhotos(); if (S.selecting.size === ps.length) S.selecting.clear(); else ps.forEach(p => S.selecting.add(p.id)); draw(el); }
         if (e.target.id === 't-link') { const ps = [...S.selecting].map(photoById).filter(Boolean); close(); linkSheet(ps, false); }
+        if (e.target.id === 't-move') {
+          const ps = [...S.selecting].map(photoById).filter(Boolean);
+          const to = await chooseUnit(`Move ${ps.length} photo${ps.length > 1 ? 's' : ''} to which unit?`, ctx().unit);
+          if (!to) return;
+          await movePhotosToUnit(ps, to);
+          S.selecting.clear(); draw(el); render();
+          toast(`Moved ${ps.length} photo${ps.length > 1 ? 's' : ''} to unit ${to}`);
+        }
         if (e.target.id === 't-del') {
           const ids = [...S.selecting];
           if (await confirmSheet('Delete photos?', `Delete ${ids.length} photo${ids.length > 1 ? 's' : ''} from this phone? Their numbers won’t be reused.`, 'Delete', true)) {
@@ -1611,6 +1620,45 @@ function openTray() {
     },
     onClose() { S.selecting.clear(); render(); }
   });
+}
+
+/* ---------- moving unlinked photos to another unit ---------- */
+// Pick a unit (scheduled first, searchable). Resolves with the unit label, or null if cancelled.
+function chooseUnit(title, exclude) {
+  return new Promise(res => {
+    let done = false;
+    const order = unitsInOrder().filter(u => u.label !== exclude);
+    const row = u => `<li data-q="${esc((u.label + ' ' + (u.desc || '')).toLowerCase())}"><button data-pick-unit="${esc(u.label)}">
+      <span>${u.sched != null ? `<span class="sched">${esc(/^\d+$/.test(u.schedLabel || '') ? u.schedLabel : '•')}</span>` : ''}${esc(u.label)}${u.desc ? `<span class="sub">${esc(u.desc)}</span>` : ''}</span>
+      <span class="meta">›</span></button></li>`;
+    const sch = order.filter(u => u.sched != null), rest = order.filter(u => u.sched == null);
+    openSheet({
+      title,
+      body: `<input class="search" type="search" placeholder="Search ${order.length} units" aria-label="Search units">
+        ${sch.length ? `<h3 class="list-h">Scheduled · ${sch.length}</h3><ul class="list">${sch.map(row).join('')}</ul><h3 class="list-h">Other units · ${rest.length}</h3>` : ''}
+        <ul class="list">${rest.map(row).join('')}</ul>`,
+      foot: `<button class="btn ghost" data-close>Cancel</button>`,
+      mount(el, close) {
+        const s = $('.search', el);
+        s.oninput = () => { const q = s.value.trim().toLowerCase(); el.querySelectorAll('li').forEach(li => li.hidden = q && !li.dataset.q.includes(q)); el.querySelectorAll('.list-h').forEach(h => h.hidden = !!q); };
+        el.querySelector('.sheet-body').addEventListener('click', e => { const b = e.target.closest('[data-pick-unit]'); if (!b) return; done = true; close(); res(b.dataset.pickUnit); });
+      },
+      onClose() { if (!done) res(null); }
+    });
+  });
+}
+// Unlinked photos only: they become unlinked photos at the other unit (same component),
+// export into that unit's folder, and are marked for export again.
+async function movePhotosToUnit(photos, unit) {
+  const d = await db(); const t = d.transaction('photos', 'readwrite');
+  for (const p of photos) {
+    if (p.defectIds.length || p.unit === unit) continue;
+    if (!p.movedFrom) p.movedFrom = p.unit;
+    if (p.movedFrom === unit) delete p.movedFrom;      // moved back where it was taken
+    p.unit = unit; p.exp = { r: null, o: null };
+    t.objectStore('photos').put(p);
+  }
+  await txDone(t);
 }
 
 /* ================= Photo viewer ================= */
@@ -2037,16 +2085,16 @@ function buildWorkbook() {
   orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
 
   /* --- Photo log --- */
-  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during']];
+  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during', 'Moved from unit']];
   const sortedPh = [...S.photos].sort((a, b) => a.takenAt - b.takenAt);
   for (const ph of sortedPh) {
     const ds = ph.defectIds.map(defectById).filter(Boolean);
     pRows.push([hyperlink(ph.name, photoPath(ph)), isVideo(ph) ? 'Video' : 'Photo', origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
-      ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '']);
+      ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '']);
   }
   const wsP = XLSX.utils.aoa_to_sheet(pRows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }];
-  wsP['!autofilter'] = { ref: `A1:K${Math.max(pRows.length, 2)}` };
+  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }, { wch: 14 }];
+  wsP['!autofilter'] = { ref: `A1:L${Math.max(pRows.length, 2)}` };
 
   /* --- About --- */
   const info = [
