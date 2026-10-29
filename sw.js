@@ -1,6 +1,6 @@
 // Caches the whole app so it runs with no connection.
 // Bump VERSION whenever any app file changes so phones pick up the update.
-const VERSION = 'site-defects-v1.0.1';
+const VERSION = 'site-defects-v1.1.0';
 const FILES = [
   './',
   'index.html',
@@ -15,7 +15,8 @@ const FILES = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache so an update always gets the new files, never stale copies.
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {

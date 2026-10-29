@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -40,7 +40,7 @@ async function byProject(store, pid) { const d = await db(); return reqP(d.trans
 
 /* ================= State ================= */
 const S = {
-  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250 },
+  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250, batch: 1 },
   projects: [],
   project: null,
   obs: new Map(),        // key -> obs
@@ -72,7 +72,11 @@ async function activate(p) {
   S.settings.activeProjectId = p.id; await saveSettings();
   for (const o of await byProject('obs', p.id)) S.obs.set(o.key, o);
   S.photos = (await byProject('photos', p.id)).sort((a, b) => a.takenAt - b.takenAt);
+  for (const ph of S.photos) { // migrate v1.0 photos
+    if (!ph.exp) ph.exp = { r: ph.exportedAt || null, o: null };
+  }
   p.state = p.state || {};
+  p.addedComps = p.addedComps || [];
   if (!p.units.some(u => u.label === p.state.unit)) p.state.unit = null;
   if (!p.components.includes(p.state.component)) p.state.component = null;
 }
@@ -90,6 +94,17 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 function defectsFor(component) { return S.project.defects.filter(d => d.component === component); }
 function defectById(id) { return S.project.defects.find(d => d.id === id); }
 function photoPath(p) { return 'Photos/' + safeName(p.unit) + '/' + safeName(p.component) + '/' + p.name; }
+function genericOrigName(t) { const d = new Date(t); return `IMG_${dateKey(t)}_${pad(d.getHours(), 2)}${pad(d.getMinutes(), 2)}${pad(d.getSeconds(), 2)}.jpg`; }
+function origNameOf(p) { return p.origName || genericOrigName(p.takenAt); }
+function hasBlob(p) { return !p.removed; }
+// Units in working order: scheduled units first (by schedule), then everything else in list order.
+function unitsInOrder() {
+  const us = S.project.units.map((u, i) => ({ u, i }));
+  const sch = us.filter(x => x.u.sched != null).sort((a, b) => a.u.sched - b.u.sched || a.i - b.i);
+  const rest = us.filter(x => x.u.sched == null);
+  return [...sch, ...rest].map(x => x.u);
+}
+const isAddedComp = c => (S.project.addedComps || []).includes(c);
 function mb(n) { return (n / 1048576).toFixed(n > 1048576 * 100 ? 0 : 1) + ' MB'; }
 
 let toastT;
@@ -150,17 +165,45 @@ function parseWorkbook(wb, fileName) {
       });
     }
   }
-  // Units
+  // Units (+ optional Schedule column)
+  const UNIT_RE = /^(unit|units|unit #|unit no\.?|unit number|unit address|address|addresses|unit id)$/;
+  const SCHED_RE = /^(schedule|scheduled|schedule order|schedule #|visit|visit order|visit #|visit no\.?|order|priority|sequence|seq)$/;
+  const isSchedSheet = s => /schedule/i.test(s.name);
+  const schedValue = (raw, rowIdx) => {
+    const t = String(raw ?? '').trim(); if (!t) return null;
+    const n = Number(t.replace(/[^0-9.\-]/g, ''));
+    if (/^[#\s]*-?\d+(\.\d+)?$/.test(t)) return n;
+    const dt = Date.parse(t); if (!isNaN(dt)) return dt / 1e8; // a visit date: earlier first
+    if (/^(x|y|yes|✓|true|scheduled)$/i.test(t)) return 1e6 + rowIdx; // ticked: keep sheet order
+    return null;
+  };
   let units = [];
-  for (const s of [...sheets].sort((a, b) => (/unit|address/i.test(b.name) ? 1 : 0) - (/unit|address/i.test(a.name) ? 1 : 0))) {
-    const h = findHeader(s.rows, { unit: /^(unit|units|unit #|unit no\.?|unit number|unit address|address|addresses|unit id)$/, optDesc: /^(address|description|location|notes|building|bldg|street address)$/ });
+  for (const s of [...sheets].filter(x => !isSchedSheet(x)).sort((a, b) => (/unit|address/i.test(b.name) ? 1 : 0) - (/unit|address/i.test(a.name) ? 1 : 0))) {
+    const h = findHeader(s.rows, { unit: UNIT_RE, optDesc: /^(address|description|location|notes|building|bldg|street address)$/, optSched: SCHED_RE });
     if (!h) continue;
-    for (const r of s.rows.slice(h.row + 1)) {
-      const u = String(r[h.cols.unit] ?? '').trim(); if (!u) continue;
+    s.rows.slice(h.row + 1).forEach((r, ri) => {
+      const u = String(r[h.cols.unit] ?? '').trim(); if (!u) return;
       const desc = h.cols.optDesc != null && h.cols.optDesc !== h.cols.unit ? String(r[h.cols.optDesc] ?? '').trim() : '';
-      if (!units.some(x => x.label === u)) units.push({ label: u, desc });
-    }
+      const schedRaw = h.cols.optSched != null ? String(r[h.cols.optSched] ?? '').trim() : '';
+      const sched = h.cols.optSched != null ? schedValue(schedRaw, ri) : null;
+      if (!units.some(x => x.label === u)) units.push({ label: u, desc, sched, schedLabel: sched != null ? schedRaw : '' });
+    });
     if (units.length) break;
+  }
+  // Separate "Schedule" sheet: units listed in visit order (overrides any Schedule column)
+  const ss = sheets.find(isSchedSheet);
+  if (ss) {
+    const h = findHeader(ss.rows, { unit: UNIT_RE, optWhen: /^(date|visit date|day|time|when|notes|note)$/ });
+    if (h) {
+      let k = 0; units.forEach(u => { u.sched = null; u.schedLabel = ''; });
+      for (const r of ss.rows.slice(h.row + 1)) {
+        const lbl = String(r[h.cols.unit] ?? '').trim(); if (!lbl) continue;
+        const when = h.cols.optWhen != null ? String(r[h.cols.optWhen] ?? '').trim() : '';
+        let u = units.find(x => x.label === lbl);
+        if (!u) { u = { label: lbl, desc: '', sched: null, schedLabel: '' }; units.push(u); }
+        if (u.sched == null) { u.sched = ++k; u.schedLabel = when || String(k); }
+      }
+    }
   }
   // Stable defect ids
   const seen = new Map();
@@ -191,8 +234,36 @@ async function importProjectFile(file) {
   }
 }
 
+// Combine a fresh import with what's already on the phone.
+// Imported items come from the file (locked). Items added on site are kept.
+// Anything previously imported that has results or photos is kept too, so a re-import never loses data.
+async function mergeLists(old, parsed) {
+  const units = parsed.units.map(u => ({ ...u, added: false }));
+  const defects = parsed.defects.map(d => ({ ...d, added: false }));
+  const components = [...parsed.components];
+  let kept = 0;
+  if (old) {
+    const obs = await byProject('obs', old.id);
+    const photos = await byProject('photos', old.id);
+    const usedUnits = new Set([...obs.filter(o => o.value || o.notes || (o.photoIds || []).length).map(o => o.unit), ...photos.map(p => p.unit)]);
+    const usedDefs = new Set(obs.filter(o => o.value || o.notes || (o.photoIds || []).length).map(o => o.defectId));
+    for (const u of old.units) {
+      if (units.some(x => x.label === u.label)) continue;
+      if (u.added || usedUnits.has(u.label)) { units.push({ ...u }); if (!u.added) kept++; }
+    }
+    for (const d of old.defects) {
+      if (defects.some(x => x.id === d.id)) continue;
+      if (d.added || usedDefs.has(d.id)) { defects.push({ ...d }); if (!d.added) kept++; if (!components.includes(d.component)) components.push(d.component); }
+    }
+    for (const c of old.addedComps || []) if (!components.includes(c)) components.push(c);
+  }
+  const addedComps = components.filter(c => !parsed.components.includes(c) && (old && ((old.addedComps || []).includes(c) || defects.some(d => d.component === c && d.added))));
+  return { units, defects, components, addedComps, kept };
+}
+
 function confirmImport(parsed) {
   const existing = parsed.number && S.projects.find(p => p.number.toLowerCase() === parsed.number.toLowerCase());
+  const nSched = parsed.units.filter(u => u.sched != null).length;
   openSheet({
     title: existing ? 'Update project lists' : 'New project',
     body: `
@@ -200,9 +271,9 @@ function confirmImport(parsed) {
         <input id="pnum" value="${esc(parsed.number)}" autocomplete="off" autocapitalize="characters" placeholder="e.g. 24-118">
         <span class="hint">Used at the start of every photo name.</span></div>
       <div class="field"><label for="pname">Project name (optional)</label><input id="pname" value="${esc(parsed.name || (existing && existing.name) || '')}"></div>
-      <div class="kv"><span>Units</span><span>${parsed.units.length}</span><span>Components</span><span>${parsed.components.length}</span><span>Defect conditions</span><span>${parsed.defects.length}</span></div>
+      <div class="kv"><span>Units</span><span>${parsed.units.length}</span><span>On the schedule</span><span>${nSched || 'None'}</span><span>Components</span><span>${parsed.components.length}</span><span>Defect conditions</span><span>${parsed.defects.length}</span></div>
       <p class="note">${esc(parsed.components.join(', '))}</p>
-      ${existing ? '<p class="note">A project with this number is already on this phone. Its units and defect lists will be replaced with the ones in this file. Recorded results and photos are kept wherever the unit and defect names still match.</p>' : ''}`,
+      ${existing ? '<p class="note">A project with this number is already on this phone. Its lists will be updated from this file. Units, components and defects you added on site are kept, and so is anything that already has results or photos.</p>' : ''}`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="do-import">${existing ? 'Update lists' : 'Create project'}</button>`,
     mount(el, close) {
       $('#do-import', el).onclick = async () => {
@@ -210,12 +281,13 @@ function confirmImport(parsed) {
         if (!number) { $('#pnum', el).focus(); toast('Enter a project number'); return; }
         const target = S.projects.find(p => p.number.toLowerCase() === number.toLowerCase());
         const p = target || { id: uid(), createdAt: Date.now(), state: {} };
-        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: parsed.units, components: parsed.components, defects: parsed.defects });
+        const m = await mergeLists(target, parsed);
+        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps });
         await put('projects', { ...p, updatedAt: Date.now() });
         S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         await activate(S.projects.find(x => x.id === p.id));
         close(); render();
-        toast(target ? 'Lists updated' : 'Project created');
+        toast(target ? (m.kept ? `Lists updated · ${m.kept} item${m.kept > 1 ? 's' : ''} with data kept` : 'Lists updated') : 'Project created');
         if (!S.project.state.unit) pickUnit();
       };
     }
@@ -262,7 +334,14 @@ async function addPhotos(files, linkDefectId) {
       const dk = dateKey(takenAt);
       const seq = await nextSeq(initials, dk);
       const name = `${safeName(S.project.number)}_${safeName(initials)}_${dk}_${pad(seq, 4)}.jpg`;
-      const meta = { id: uid(), projectId: S.project.id, name, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exportedAt: null };
+      // Original name: the camera/library file name when there is a real one, otherwise a camera-style IMG_ name.
+      let orig = String(f.name || '').trim();
+      if (!orig || /^(image|photo|img|capture)(\s*\(\d+\))?\.\w+$/i.test(orig)) orig = genericOrigName(takenAt);
+      orig = safeName(orig.replace(/\.(heic|heif|png|jpeg)$/i, '.jpg'));
+      if (!/\.jpg$/i.test(orig)) orig += '.jpg';
+      const taken = new Set(S.photos.map(origNameOf));
+      if (taken.has(orig)) { const base = orig.replace(/\.jpg$/i, ''); let k = 2; while (taken.has(`${base}_${k}.jpg`)) k++; orig = `${base}_${k}.jpg`; }
+      const meta = { id: uid(), projectId: S.project.id, name, origName: orig, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exp: { r: null, o: null } };
       const d = await db(); const t = d.transaction(['photos', 'blobs', 'thumbs'], 'readwrite');
       t.objectStore('photos').put(meta); t.objectStore('blobs').put(full, meta.id); t.objectStore('thumbs').put(thumb, meta.id);
       await txDone(t);
@@ -272,7 +351,22 @@ async function addPhotos(files, linkDefectId) {
   }
   busy(null);
   if (!persistAsked && navigator.storage && navigator.storage.persist) { persistAsked = true; navigator.storage.persist().catch(() => {}); }
+  checkStorage();
   return added;
+}
+// Warn when the phone's space for this app is getting full.
+let lastStorageWarn = 0;
+async function storageInfo() {
+  try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); return { used: e.usage || 0, quota: e.quota || 0 }; } } catch (_) {}
+  return null;
+}
+async function checkStorage(force) {
+  const s = await storageInfo(); if (!s || !s.quota) return;
+  const frac = s.used / s.quota;
+  if (frac > 0.8 && (force || Date.now() - lastStorageWarn > 10 * 60 * 1000)) {
+    lastStorageWarn = Date.now();
+    alertSheet('Storage is getting full', `This app is using ${mb(s.used)} of the ${mb(s.quota)} available (${Math.round(frac * 100)}%).\n\nExport your photos, then use Settings → Free up space to remove exported photos from this phone. Freeing space elsewhere on the iPhone also raises the limit.`);
+  }
 }
 async function savePhotoMeta(p) { await put('photos', p); }
 async function linkPhoto(photo, defectId, setValue, skipPhotoSave) {
@@ -326,10 +420,58 @@ function photoById(id) { return S.photos.find(p => p.id === id); }
 function trayPhotos() { const { unit, component } = ctx(); return S.photos.filter(p => p.unit === unit && p.component === component && !p.defectIds.length); }
 
 let pendingCapture = null;
-function capture(defectId) {
+let batch = null; // photos taken in the current batch, assigned together once it's full
+function capture(defectId, continuing) {
   if (!requireContext()) return;
-  pendingCapture = { defectId: defectId || null };
+  if (!continuing || !batch) batch = { defectId: defectId || null, photos: [] };
+  pendingCapture = { defectId: batch.defectId };
   const inp = $('#cam-input'); inp.value = ''; inp.click();
+}
+function batchSize() { return Math.min(10, Math.max(1, S.settings.batch || 1)); }
+async function setBatchSize(n) {
+  S.settings.batch = Math.min(10, Math.max(1, n)); await saveSettings();
+  document.querySelectorAll('.bs-val').forEach(e => e.textContent = S.settings.batch);
+  document.querySelectorAll('[data-bs="-1"]').forEach(b => b.disabled = S.settings.batch <= 1);
+  document.querySelectorAll('[data-bs="1"]').forEach(b => b.disabled = S.settings.batch >= 10);
+  document.dispatchEvent(new Event('batchchange'));
+}
+function stepperHTML() {
+  const n = batchSize();
+  return `<div class="stepper" role="group" aria-label="Photos per batch"><span>Photos before linking</span>
+    <button data-bs="-1" aria-label="Fewer" ${n <= 1 ? 'disabled' : ''}>−</button><b class="bs-val">${n}</b><button data-bs="1" aria-label="More" ${n >= 10 ? 'disabled' : ''}>+</button></div>`;
+}
+document.addEventListener('click', e => { const b = e.target.closest('[data-bs]'); if (b) setBatchSize(batchSize() + Number(b.dataset.bs)); });
+function finishBatch() {
+  const b = batch; batch = null; if (!b || !b.photos.length) return;
+  if (b.defectId) { toast(`${b.photos.length} photo${b.photos.length > 1 ? 's' : ''} linked to ${defectById(b.defectId).label}`); return; }
+  linkSheet(b.photos, true);
+}
+function batchSheet() {
+  const b = batch;
+  const d = b.defectId ? defectById(b.defectId) : null;
+  let draw = null;
+  openSheet({
+    title: 'Photo saved', body: '', foot: ' ',
+    mount(el, close) {
+      draw = () => {
+        const n = b.photos.length, N = batchSize();
+        $('h2', el).textContent = `Photo ${n} of ${Math.max(N, n)} saved`;
+        $('.sheet-body', el).innerHTML = `<div class="preview-strip">${b.photos.map(p => thumbHTML(p, { badge: '#' + p.seq })).join('')}</div>
+          <p class="note">${d ? `Linking to <b>${esc(d.label)}</b>.` : 'You’ll link the whole batch to a condition when it’s done.'}</p>${stepperHTML()}`;
+        $('.sheet-foot', el).innerHTML = n >= N
+          ? `<button class="btn" id="b-done">${d ? 'Done' : `Link ${n} photos`}</button>`
+          : `<button class="btn ghost" id="b-done">${d ? 'Done' : `Link ${n} now`}</button><button class="btn" id="b-next">Take photo ${n + 1}</button>`;
+        hydrateThumbs(el);
+      };
+      draw();
+      document.addEventListener('batchchange', draw);
+      el.addEventListener('click', e => {
+        if (e.target.id === 'b-next') { close(); capture(b.defectId, true); }
+        if (e.target.id === 'b-done') { close(); finishBatch(); }
+      });
+    },
+    onClose() { document.removeEventListener('batchchange', draw); }
+  });
 }
 function fromLibrary() {
   if (!requireContext()) return;
@@ -342,9 +484,11 @@ async function onFilesChosen(e) {
   const added = await addPhotos(files, pc.defectId);
   if (!added.length) return;
   render();
-  if (pc.defectId) { toast('Saved ' + added[0].name); return; }
   if (pc.library) { toast(added.length + ' photo' + (added.length > 1 ? 's' : '') + ' added to unlinked'); openTray(); return; }
-  linkSheet(added, true);
+  if (!batch) batch = { defectId: pc.defectId, photos: [] };
+  batch.photos.push(...added);
+  if (batch.photos.length >= batchSize()) finishBatch();
+  else batchSheet();
 }
 function requireContext() {
   if (!S.project) { toast('Import a project first'); return false; }
@@ -388,26 +532,42 @@ function unitProgress(unit, component) {
   let n = 0; for (const d of ds) { const o = getObs(unit, d.id); if (o && o.value) n++; }
   return { n, total: ds.length };
 }
+function unitAnyData(label) {
+  for (const o of S.obs.values()) if (o.unit === label && (o.value || o.notes)) return true;
+  return S.photos.some(ph => ph.unit === label);
+}
 function pickUnit() {
   const p = S.project; const comp = p.state.component;
-  const rows = () => p.units.map(u => {
+  const row = u => {
     const pr = comp ? unitProgress(u.label, comp) : null;
     const done = pr && pr.total && pr.n === pr.total;
-    return `<li data-q="${esc((u.label + ' ' + u.desc).toLowerCase())}"><button data-unit="${esc(u.label)}" aria-current="${u.label === p.state.unit}">
-      <span>${esc(u.label)}${u.desc ? `<span class="sub">${esc(u.desc)}</span>` : ''}</span>
-      ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : ''}</button></li>`;
-  }).join('');
+    const subs = [u.desc, u.sched != null && u.schedLabel && !/^\d+$/.test(u.schedLabel) ? 'Scheduled ' + u.schedLabel : '', u.added ? 'Added on site' : ''].filter(Boolean).join(' · ');
+    return `<li data-q="${esc((u.label + ' ' + (u.desc || '')).toLowerCase())}"><button data-unit="${esc(u.label)}" aria-current="${u.label === p.state.unit}">
+      <span>${u.sched != null ? `<span class="sched">${esc(/^\d+$/.test(u.schedLabel || '') ? u.schedLabel : '•')}</span>` : ''}${esc(u.label)}${subs ? `<span class="sub">${esc(subs)}</span>` : ''}</span>
+      ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : (unitAnyData(u.label) ? '<span class="meta">•</span>' : '')}</button></li>`;
+  };
+  const ordered = unitsInOrder();
+  const sch = ordered.filter(u => u.sched != null), rest = ordered.filter(u => u.sched == null);
+  const body = sch.length
+    ? `<h3 class="list-h">Scheduled · ${sch.length}</h3><ul class="list">${sch.map(row).join('')}</ul><h3 class="list-h">Other units · ${rest.length}</h3><ul class="list">${rest.map(row).join('')}</ul>`
+    : `<ul class="list">${rest.map(row).join('')}</ul>`;
   openSheet({
     title: 'Which unit are you at?',
-    body: `<input class="search" type="search" placeholder="Search ${p.units.length} units" aria-label="Search units"><ul class="list">${rows()}</ul>`,
+    body: `<input class="search" type="search" placeholder="Search ${p.units.length} units" aria-label="Search units">${body}`,
+    foot: `<button class="btn ghost" id="add-unit">+ Add unit</button>`,
     mount(el, close) {
       const s = $('.search', el);
-      s.oninput = () => { const q = s.value.trim().toLowerCase(); el.querySelectorAll('li').forEach(li => li.hidden = q && !li.dataset.q.includes(q)); };
-      el.querySelector('.list').onclick = async e => {
+      s.oninput = () => {
+        const q = s.value.trim().toLowerCase();
+        el.querySelectorAll('li').forEach(li => li.hidden = q && !li.dataset.q.includes(q));
+        el.querySelectorAll('.list-h').forEach(h => h.hidden = !!q);
+      };
+      el.querySelector('.sheet-body').addEventListener('click', async e => {
         const b = e.target.closest('[data-unit]'); if (!b) return;
         p.state.unit = b.dataset.unit; await saveProject(); close(); render();
         if (!p.state.component) pickComponent();
-      };
+      });
+      $('#add-unit', el).onclick = () => { close(); addUnitSheet(s.value.trim()); };
       const cur = el.querySelector('[aria-current="true"]'); cur && cur.scrollIntoView({ block: 'center' });
     }
   });
@@ -418,21 +578,153 @@ function pickComponent() {
     title: 'Which component?',
     body: `<ul class="list">${p.components.map(c => {
       const pr = unit ? unitProgress(unit, c) : null; const done = pr && pr.total && pr.n === pr.total;
-      return `<li><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}</span>
+      return `<li><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}${isAddedComp(c) ? '<span class="sub">Added on site</span>' : ''}</span>
         ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : ''}</button></li>`;
     }).join('')}</ul>`,
+    foot: `<button class="btn ghost" id="add-comp">+ Add component</button>`,
     mount(el, close) {
       el.querySelector('.list').onclick = async e => {
         const b = e.target.closest('[data-comp]'); if (!b) return;
         p.state.component = b.dataset.comp; await saveProject(); close(); render();
         if (!p.state.unit) pickUnit();
       };
+      $('#add-comp', el).onclick = () => { close(); addComponentSheet(); };
     }
   });
 }
+
+/* ---------- adding to the lists on site ---------- */
+function addUnitSheet(prefill) {
+  const p = S.project;
+  openSheet({
+    title: 'Add a unit',
+    body: `<div class="field"><label for="nu-l">Unit</label><input id="nu-l" value="${esc(prefill || '')}" autocomplete="off" placeholder="e.g. 105"><span class="hint">Also used as the photo folder name.</span></div>
+      <div class="field"><label for="nu-d">Address or description (optional)</label><input id="nu-d" autocomplete="off"></div>
+      <label class="check"><input type="checkbox" id="nu-s"> Add to the end of the schedule</label>
+      <p class="note">Units you add can be deleted later from Menu → Edit lists. Units from the import file are protected.</p>`,
+    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nu-go">Add unit</button>`,
+    mount(el, close) {
+      const inp = $('#nu-l', el); inp.focus();
+      $('#nu-go', el).onclick = async () => {
+        const label = inp.value.trim();
+        if (!label) { inp.focus(); toast('Enter a unit'); return; }
+        if (p.units.some(u => u.label.toLowerCase() === label.toLowerCase())) { toast(`Unit ${label} is already in the list`); return; }
+        const maxS = Math.max(0, ...p.units.filter(u => u.sched != null).map(u => u.sched));
+        const sched = $('#nu-s', el).checked ? maxS + 1 : null;
+        p.units.push({ label, desc: $('#nu-d', el).value.trim(), sched, schedLabel: sched != null ? 'added' : '', added: true });
+        p.state.unit = label; await saveProject(); close(); render();
+        toast(`Unit ${label} added`);
+        if (!p.state.component) pickComponent();
+      };
+    }
+  });
+}
+function addComponentSheet() {
+  const p = S.project;
+  openSheet({
+    title: 'Add a component',
+    body: `<div class="field"><label for="nc-l">Component</label><input id="nc-l" autocomplete="off" placeholder="e.g. Decks"></div>
+      <p class="note">After adding it, add its defect conditions from the bottom of the list.</p>`,
+    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nc-go">Add component</button>`,
+    mount(el, close) {
+      const inp = $('#nc-l', el); inp.focus();
+      $('#nc-go', el).onclick = async () => {
+        const c = inp.value.trim();
+        if (!c) { inp.focus(); toast('Enter a component'); return; }
+        if (p.components.some(x => x.toLowerCase() === c.toLowerCase())) { toast(`${c} is already in the list`); return; }
+        p.components.push(c); p.addedComps.push(c); p.state.component = c;
+        await saveProject(); close(); render(); toast(`${c} added`);
+        if (!p.state.unit) pickUnit(); else addDefectSheet();
+      };
+    }
+  });
+}
+function addDefectSheet() {
+  const p = S.project; const comp = p.state.component;
+  openSheet({
+    title: 'Add a defect condition',
+    body: `<p class="note">Component: <b>${esc(comp)}</b></p>
+      <div class="field"><label for="nd-l">Defect condition</label><input id="nd-l" autocomplete="off" placeholder="e.g. Sealant missing at penetration"></div>
+      <div class="field"><label for="nd-c">Code (optional)</label><input id="nd-c" autocomplete="off" autocapitalize="characters" placeholder="e.g. ST-9"></div>
+      <p class="note">It’s added for every unit. Conditions you add can be deleted later; ones from the import file are protected.</p>`,
+    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nd-go">Add condition</button>`,
+    mount(el, close) {
+      const inp = $('#nd-l', el); inp.focus();
+      $('#nd-go', el).onclick = async () => {
+        const label = inp.value.trim(), code = $('#nd-c', el).value.trim();
+        if (!label) { inp.focus(); toast('Enter the condition'); return; }
+        const id = slug(comp) + '__' + slug(code ? code + ' ' + label : label);
+        if (p.defects.some(d => d.id === id || (d.component === comp && d.label.toLowerCase() === label.toLowerCase()))) { toast('That condition is already in the list'); return; }
+        // keep the component's conditions together: insert after its last condition
+        let at = -1; p.defects.forEach((d, i) => { if (d.component === comp) at = i; });
+        p.defects.splice(at < 0 ? p.defects.length : at + 1, 0, { component: comp, label, code, id, added: true });
+        await saveProject(); close(); render(); toast('Condition added');
+        const sec = document.querySelector(`.defect[data-d="${id}"]`); sec && sec.scrollIntoView({ block: 'center' });
+      };
+    }
+  });
+}
+function editListsSheet() {
+  const p = S.project;
+  const lockedU = p.units.filter(u => !u.added).length, lockedC = p.components.filter(c => !isAddedComp(c)).length, lockedD = p.defects.filter(d => !d.added).length;
+  const draw = el => {
+    const au = p.units.filter(u => u.added), ac = p.components.filter(isAddedComp), ad = p.defects.filter(d => d.added);
+    const row = (label, sub, attr) => `<div class="link-row"><span>${esc(label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span><span class="acts"><button class="mini" ${attr}>Delete</button></span></div>`;
+    $('.sheet-body', el).innerHTML = `
+      <p class="note">🔒 ${lockedU} units, ${lockedC} components and ${lockedD} conditions came from the import file and can’t be deleted here. Items you added on site are listed below.</p>
+      <div class="section-h">Units added on site</div>${au.length ? au.map(u => row(u.label, u.desc, `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}
+      <div class="section-h">Components added on site</div>${ac.length ? ac.map(c => row(c, '', `data-dc="${esc(c)}"`)).join('') : '<p class="note">None</p>'}
+      <div class="section-h">Conditions added on site</div>${ad.length ? ad.map(d => row((d.code ? d.code + ' ' : '') + d.label, d.component, `data-dd="${d.id}"`)).join('') : '<p class="note">None</p>'}`;
+  };
+  openSheet({
+    title: 'Edit lists', body: '',
+    foot: `<button class="btn ghost" id="el-u">+ Unit</button><button class="btn ghost" id="el-c">+ Component</button>`,
+    mount(el, close) {
+      draw(el);
+      $('#el-u', el).onclick = () => { close(); addUnitSheet(); };
+      $('#el-c', el).onclick = () => { close(); addComponentSheet(); };
+      el.querySelector('.sheet-body').addEventListener('click', async e => {
+        const b = e.target.closest('[data-du],[data-dc],[data-dd]'); if (!b) return;
+        if (b.dataset.du != null) {
+          const label = b.dataset.du;
+          if (S.photos.some(ph => ph.unit === label)) { alertSheet('Can’t delete this unit yet', `Unit ${label} has photos. Delete or keep its photos first — deleting the unit would leave them without a folder.`); return; }
+          const has = [...S.obs.values()].some(o => o.unit === label && (o.value || o.notes));
+          if (!await confirmSheet(`Delete unit ${label}?`, has ? `Its recorded results and notes will be deleted too.` : 'It has no results yet.', 'Delete', true)) return;
+          await deleteObsWhere(o => o.unit === label);
+          p.units = p.units.filter(u => u.label !== label); if (p.state.unit === label) p.state.unit = null;
+        }
+        if (b.dataset.dc != null) {
+          const c = b.dataset.dc;
+          if (p.defects.some(d => d.component === c && !d.added)) { toast('This component has protected conditions'); return; }
+          if (S.photos.some(ph => ph.component === c)) { alertSheet('Can’t delete this component yet', `${c} has photos. Delete or keep its photos first.`); return; }
+          if (!await confirmSheet(`Delete ${c}?`, 'Its added conditions and any results for them will be deleted too.', 'Delete', true)) return;
+          const ids = new Set(p.defects.filter(d => d.component === c).map(d => d.id));
+          await deleteObsWhere(o => ids.has(o.defectId) || o.defectId === generalId(c));
+          p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c);
+          if (p.state.component === c) p.state.component = null;
+        }
+        if (b.dataset.dd != null) {
+          const d = defectById(b.dataset.dd);
+          if (S.photos.some(ph => ph.defectIds.includes(d.id))) { alertSheet('Can’t delete this condition yet', 'Photos are linked to it. Unlink them first (tap a photo → Unlink) so they aren’t lost from the spreadsheet.'); return; }
+          if (!await confirmSheet('Delete condition?', `“${d.label}” and any results recorded for it will be deleted.`, 'Delete', true)) return;
+          await deleteObsWhere(o => o.defectId === d.id);
+          p.defects = p.defects.filter(x => x.id !== d.id);
+        }
+        await saveProject(); draw(el); render();
+      });
+    }
+  });
+}
+async function deleteObsWhere(fn) {
+  const dead = [...S.obs.values()].filter(fn);
+  if (!dead.length) return;
+  const d = await db(); const t = d.transaction('obs', 'readwrite');
+  for (const o of dead) { t.objectStore('obs').delete(o.key); S.obs.delete(o.key); }
+  await txDone(t);
+}
 async function stepUnit(dir) {
-  const p = S.project; const i = p.units.findIndex(u => u.label === p.state.unit);
-  const n = p.units[i + dir]; if (!n) return;
+  const p = S.project; const order = unitsInOrder(); const i = order.findIndex(u => u.label === p.state.unit);
+  const n = order[i + dir]; if (!n) return;
   p.state.unit = n.label; await saveProject(); render(); window.scrollTo(0, 0);
   toast('Unit ' + n.label);
 }
@@ -444,9 +736,9 @@ function linkSheet(photos, fresh) {
   const unit = photos[0].unit;
   const n = photos.length;
   openSheet({
-    title: fresh ? 'Photo saved — link it?' : `Link ${n} photo${n > 1 ? 's' : ''}`,
+    title: fresh ? (n > 1 ? `${n} photos saved — link them?` : 'Photo saved — link it?') : `Link ${n} photo${n > 1 ? 's' : ''}`,
     body: `<div class="preview-strip">${photos.map(p => thumbHTML(p)).join('')}</div>
-      <p class="note">${fresh ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this unit’s folder.</p>
+      <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this unit’s folder.</p>
       <div>${ds.map(d => {
         const o = getObs(unit, d.id);
         return `<div class="link-row"><span>${d.code ? `<b>${esc(d.code)}</b> ` : ''}${esc(d.label)} ${o && o.value ? `<span class="vchip" data-v="${o.value}">${o.value}</span>` : ''}</span>
@@ -509,11 +801,14 @@ function openTray() {
 /* ================= Photo viewer ================= */
 async function viewPhoto(id) {
   const p = photoById(id); if (!p) return;
-  const blob = await get('blobs', id); const url = blob ? URL.createObjectURL(blob) : '';
+  const blob = hasBlob(p) ? await get('blobs', id) : null; const url = blob ? URL.createObjectURL(blob) : '';
+  const tsrc = url ? '' : await thumbSrc(id);
   const comp = p.component; const ds = defectsFor(comp);
   const draw = el => {
-    $('.sheet-body', el).innerHTML = `<img class="viewer-img" src="${url}" alt="">
+    $('.sheet-body', el).innerHTML = `<img class="viewer-img" src="${url || tsrc}" alt="">
+      ${url ? '' : '<p class="note">Full-size photo was exported and removed from this phone to free space. This is the thumbnail.</p>'}
       <div class="fname">${esc(p.name)}</div>
+      <div class="path">Original: ${esc(origNameOf(p))}</div>
       <div class="path">${esc(photoPath(p))} · ${fmtTime(p.takenAt)} · ${mb(p.size || 0)}</div>
       <div class="section-h">Proves</div>
       ${p.defectIds.length ? p.defectIds.map(d => { const df = defectById(d); return `<div class="link-row"><span>${esc(df ? df.label : d)}</span><span class="acts"><button class="mini" data-unlink="${d}">Unlink</button></span></div>`; }).join('') : '<p class="note">Not linked to a condition yet.</p>'}
@@ -565,22 +860,25 @@ function render() {
   const app = $('#app');
   if (!S.settings.initials || !S.project) { renderWelcome(app); return; }
   const p = S.project; const st = p.state;
-  const ui = p.units.findIndex(u => u.label === st.unit);
-  const unit = p.units[ui];
+  const order = unitsInOrder();
+  const ui = order.findIndex(u => u.label === st.unit);
+  const unit = order[ui];
+  const schedTag = unit && unit.sched != null ? `Scheduled${unit.schedLabel && unit.schedLabel !== 'added' ? ' · ' + unit.schedLabel : ''}` : '';
   app.innerHTML = `
     <header class="tag">
       <div class="tag-top"><span class="proj">${esc(p.number)}${p.name ? ' · ' + esc(p.name) : ''} · ${esc(S.settings.initials)}</span>
         <button class="icon-btn" id="menu" aria-label="Menu">☰</button></div>
       <div class="tag-unit">
         <button class="step" id="prev" aria-label="Previous unit" ${ui <= 0 ? 'disabled' : ''}>‹</button>
-        <button class="unit-btn" id="unit"><span class="lbl">Unit</span><span class="val">${unit ? esc(unit.label) : 'Select unit'}</span>${unit && unit.desc ? `<span class="sub">${esc(unit.desc)}</span>` : ''}</button>
-        <button class="step" id="next" aria-label="Next unit" ${ui < 0 || ui >= p.units.length - 1 ? 'disabled' : ''}>›</button>
+        <button class="unit-btn" id="unit"><span class="lbl">Unit</span><span class="val">${unit ? esc(unit.label) : 'Select unit'}</span>${unit && (unit.desc || schedTag) ? `<span class="sub">${esc([unit.desc, schedTag].filter(Boolean).join(' · '))}</span>` : ''}</button>
+        <button class="step" id="next" aria-label="Next unit" ${ui < 0 || ui >= order.length - 1 ? 'disabled' : ''}>›</button>
       </div>
       <div class="comp-row"><button class="comp-btn" id="comp"><span>${st.component ? esc(st.component) : 'Select component'}</span><span class="chev">▾</span></button>
         <span class="progress" id="progress"></span></div>
     </header>
     <main id="list"></main>
     <nav class="bar">
+      <div class="bar-top">${stepperHTML()}</div>
       <button class="side" id="tray">Unlinked<span class="n" id="tray-n">0</span></button>
       <button class="shutter" id="shoot" aria-label="Take photo"><span>Photo</span></button>
       <button class="side" id="export">Export</button>
@@ -607,7 +905,7 @@ function defectHTML(d) {
   const photos = o.photoIds.map(photoById).filter(Boolean);
   const open = S.openNotes.has(d.id) || !!o.notes;
   return `<section class="defect" data-d="${d.id}" data-v="${o.value}">
-    <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}</h3>
+    <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}${d.added ? ' <span class="added">Added on site</span>' : ''}</h3>
     <div class="results" role="group" aria-label="Result">
       ${RESULTS.map(r => `<button class="res" data-r="${r}" aria-pressed="${o.value === r}">${r}</button>`).join('')}
     </div>
@@ -633,9 +931,12 @@ function renderList() {
   const ds = defectsFor(st.component);
   const gid = generalId(st.component);
   const g = getObs(st.unit, gid);
-  list.innerHTML = ds.map(defectHTML).join('') + `
+  list.innerHTML = (ds.length ? '' : `<div class="empty"><h2>No conditions yet</h2>${esc(st.component)} has no defect conditions. Add the first one below.</div>`)
+    + ds.map(defectHTML).join('') + `
+    <button class="add-row" id="add-defect">+ Add defect condition to ${esc(st.component)}</button>
     <section class="defect general"><h3 class="d-title">General notes — ${esc(st.unit)} · ${esc(st.component)}</h3>
       <textarea class="notes" data-note="${gid}" placeholder="Anything else at this unit for this component">${esc(g ? g.notes : '')}</textarea></section>`;
+  $('#add-defect').onclick = addDefectSheet;
   hydrateThumbs(list);
 }
 function renderDefect(id) {
@@ -706,13 +1007,15 @@ function openMenu() {
     body: `<ul class="list">
       <li><button id="m-proj"><span>Projects<span class="sub">${S.projects.length} on this phone · switch, import, update lists</span></span><span class="meta">›</span></button></li>
       <li><button id="m-lib"><span>Add photos from library<span class="sub">Import photos you took with the Camera app into ${esc(S.project.state.unit || 'the current unit')}</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-lists"><span>Edit lists<span class="sub">Add units, components and conditions · delete ones added on site</span></span><span class="meta">›</span></button></li>
       <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
-      <li><button id="m-set"><span>Settings<span class="sub">Initials ${esc(S.settings.initials)} · photo size · storage</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
       <li><button id="m-tpl"><span>Get the Excel template</span><span class="meta">›</span></button></li>
     </ul><p class="note" style="margin-top:14px">Version ${APP_VERSION}. Data is stored only on this phone. Export regularly as a backup.</p>`,
     mount(el, close) {
       $('#m-proj', el).onclick = () => { close(); openProjects(); };
       $('#m-lib', el).onclick = () => { close(); fromLibrary(); };
+      $('#m-lists', el).onclick = () => { close(); editListsSheet(); };
       $('#m-export', el).onclick = () => { close(); openExport(); };
       $('#m-set', el).onclick = () => { close(); openSettings(); };
       $('#m-tpl', el).onclick = () => { close(); downloadTemplate(); };
@@ -732,7 +1035,7 @@ function openProjects() {
       $('#p-imp', el).onclick = () => { close(); const x = $('#xls-input'); x.value = ''; x.click(); };
       $('#p-del', el).onclick = async () => {
         const p = S.project; const n = S.photos.length;
-        const unexported = S.photos.filter(x => !x.exportedAt).length;
+        const unexported = S.photos.filter(x => hasBlob(x) && !x.exp.r && !x.exp.o).length;
         if (!await confirmSheet('Delete ' + p.number + '?', `This removes the project, all its results and ${n} photos from this phone.${unexported ? `\n\n${unexported} photos have never been exported.` : ''}\n\nThis can’t be undone.`, 'Delete project', true)) return;
         busy('Deleting…');
         const d = await db(); const t = d.transaction(['projects', 'obs', 'photos', 'blobs', 'thumbs'], 'readwrite');
@@ -747,23 +1050,39 @@ function openProjects() {
   });
 }
 async function openSettings() {
-  let est = '';
-  try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); est = `${mb(e.usage || 0)} used of about ${mb(e.quota || 0)} available to this app`; } } catch (_) {}
+  const si = await storageInfo();
+  const pct = si && si.quota ? Math.round(si.used / si.quota * 100) : null;
+  const est = si ? `${mb(si.used)} used of about ${mb(si.quota)} this app may use${pct != null ? ` (${pct}%)` : ''}` : '';
   let persisted = false; try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : false; } catch (_) {}
+  const onPhone = S.photos.filter(hasBlob);
+  const freeable = onPhone.filter(p => p.exp.r || p.exp.o);
+  const freeMB = freeable.reduce((s, p) => s + (p.size || 0), 0);
+  const notExp = onPhone.filter(p => !p.exp.r && !p.exp.o).length;
   openSheet({
     title: 'Settings',
     body: `<div class="field"><label for="s-ini">Your initials</label><input id="s-ini" value="${esc(S.settings.initials)}" maxlength="5" autocapitalize="characters"><span class="hint">Used in new photo names. Existing photos keep their names.</span></div>
       <div class="field"><label for="s-max">Photo size</label><select id="s-max">
         <option value="0">Full resolution (largest files)</option><option value="3000">Large · 3000 px</option><option value="2000">Medium · 2000 px (about ¼ the storage)</option></select>
-        <span class="hint">Applies to new photos.</span></div>
+        <span class="hint">Applies to new photos, to both the original and the renamed copy. The phone stores each photo once; the two copies are made when you export.</span></div>
       <div class="field"><label for="s-part">Export part size</label><select id="s-part">
         <option value="150">150 MB per ZIP</option><option value="250">250 MB per ZIP</option><option value="500">500 MB per ZIP</option></select>
         <span class="hint">Large photo exports are split into parts so the phone doesn’t run out of memory.</span></div>
       <div class="section-h">Storage</div>
-      <p class="note">${esc(est || 'Storage estimate not available')}<br>${persisted ? 'Storage is protected from automatic clean-up.' : 'Add this app to your Home Screen and keep exporting regularly — iOS may clear website storage if the phone runs very low on space.'}</p>
-      <p class="note">${S.photos.length} photos in this project · ${S.photos.filter(p => !p.exportedAt).length} not yet exported</p>`,
+      ${pct != null ? `<div class="meter" aria-hidden="true"><span style="width:${Math.min(100, pct)}%" class="${pct > 80 ? 'hot' : ''}"></span></div>` : ''}
+      <p class="note">${esc(est || 'Storage estimate not available')}<br>${persisted ? 'Storage is protected from automatic clean-up.' : 'Keep exporting regularly — iOS may clear app storage if the phone runs critically low on space.'}</p>
+      <div class="kv"><span>Photos on this phone</span><span>${onPhone.length}</span><span>Not yet exported</span><span>${notExp}</span><span>Exported, still on phone</span><span>${freeable.length} (${mb(freeMB)})</span><span>Already removed</span><span>${S.photos.length - onPhone.length}</span></div>
+      <button class="btn ghost" id="s-free" style="width:100%" ${freeable.length ? '' : 'disabled'}>Free up space — remove ${freeable.length} exported photos</button>
+      <p class="note">Removes the full-size photos you’ve already exported from this phone. Thumbnails, results, notes and photo links stay, so the spreadsheet is unchanged.</p>`,
     foot: `<button class="btn" id="s-save">Save</button>`,
     mount(el, close) {
+      $('#s-free', el).onclick = async () => {
+        if (!await confirmSheet('Free up space?', `Remove ${freeable.length} exported photos (${mb(freeMB)}) from this phone?\n\nMake sure the exported ZIPs are saved somewhere safe (Files, OneDrive, your computer) first. Removed photos can’t be exported again from this phone.`, 'Remove photos', true)) return;
+        busy('Freeing space…');
+        const d = await db(); const t = d.transaction(['photos', 'blobs'], 'readwrite');
+        const now = Date.now();
+        for (const ph of freeable) { ph.removed = now; t.objectStore('photos').put(ph); t.objectStore('blobs').delete(ph.id); }
+        await txDone(t); busy(null); close(); render(); toast(`Removed ${freeable.length} photos · ${mb(freeMB)} freed`);
+      };
       $('#s-max', el).value = String(S.settings.photoMax || 0);
       $('#s-part', el).value = String(S.settings.partMB || 250);
       $('#s-save', el).onclick = async () => {
@@ -814,7 +1133,7 @@ function buildWorkbook() {
   const lastRow = rows.length;
 
   /* --- Summary (live formulas against Observations) --- */
-  const sRows = [['Component', 'Code', 'Defect condition', 'Defective (1)', 'Observed (1 + 0)', '% defective', 'NA', 'NR', 'Not yet recorded']];
+  const sRows = [['Component', 'Code', 'Defect condition', 'Defective (1)', 'Observed (1 + 0)', '% defective', 'NA', 'NR', 'Not yet recorded', 'Source']];
   const range = c => `Observations!$${c}$2:$${c}$${Math.max(lastRow, 2)}`;
   p.defects.forEach((d, i) => {
     const r = i + 2;
@@ -828,7 +1147,8 @@ function buildWorkbook() {
       { t: 'n', v: c1 + c0 ? c1 / (c1 + c0) : 0, f: `IF(E${r}=0,0,D${r}/E${r})`, z: '0%' },
       { t: 'n', v: na, f: `COUNTIFS(${base},${range('E')},"NA")` },
       { t: 'n', v: nr, f: `COUNTIFS(${base},${range('E')},"NR")` },
-      { t: 'n', v: p.units.length - (c1 + c0 + na + nr), f: `${p.units.length}-E${r}-G${r}-H${r}` }]);
+      { t: 'n', v: p.units.length - (c1 + c0 + na + nr), f: `${p.units.length}-E${r}-G${r}-H${r}` },
+      d.added ? 'Added on site' : 'Import file']);
   });
   const sr = sRows.length;
   const tot = (col) => ({ t: 'n', v: 0, f: `SUM(${col}2:${col}${sr})` });
@@ -839,28 +1159,28 @@ function buildWorkbook() {
   last[5].v = last[4].v ? last[3].v / last[4].v : 0;
   const wsS = XLSX.utils.aoa_to_sheet(sRows);
   for (let r = 2; r <= sRows.length; r++) { const a = 'F' + r; if (wsS[a]) wsS[a].z = '0%'; }
-  wsS['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 6 }, { wch: 6 }, { wch: 14 }];
-  wsS['!autofilter'] = { ref: `A1:I${sRows.length - 1}` };
+  wsS['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 6 }, { wch: 6 }, { wch: 14 }, { wch: 14 }];
+  wsS['!autofilter'] = { ref: `A1:J${sRows.length - 1}` };
 
   /* --- Unit matrix (like the paper form) --- */
   const defs = p.defects;
-  const r1 = ['Unit', 'Address / description'], r2 = ['', ''];
+  const r1 = ['Unit', 'Address / description', 'Schedule'], r2 = ['', '', ''];
   const merges = [];
-  let col = 2;
+  let col = 3;
   for (const c of p.components) {
     const ds = defs.filter(d => d.component === c); if (!ds.length) continue;
     r1.push(c, ...Array(ds.length - 1).fill(''));
     if (ds.length > 1) merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + ds.length - 1 } });
-    ds.forEach(d => r2.push(d.code ? d.code + ' ' + d.label : d.label));
+    ds.forEach(d => r2.push((d.code ? d.code + ' ' + d.label : d.label) + (d.added ? ' (added on site)' : '')));
     col += ds.length;
   }
   const orderedDefs = p.components.flatMap(c => defs.filter(d => d.component === c));
-  const firstC = 2, lastC = 2 + orderedDefs.length - 1;
+  const firstC = 3, lastC = 3 + orderedDefs.length - 1;
   r1.push('Defective (1)', 'Observed (1 + 0)', 'Photos'); r2.push('', '', '');
   const mRows = [r1, r2];
   p.units.forEach((u, ui) => {
     const rr = ui + 3;
-    const row = [u.label, u.desc || ''];
+    const row = [u.label, [u.desc, u.added ? '(added on site)' : ''].filter(Boolean).join(' '), u.sched != null ? (u.schedLabel && u.schedLabel !== 'added' ? u.schedLabel : 'Yes') : ''];
     let c1 = 0, c10 = 0, nph = 0;
     for (const d of orderedDefs) {
       const o = getObs(u.label, d.id);
@@ -876,7 +1196,7 @@ function buildWorkbook() {
     mRows.push(row);
   });
   const endU = p.units.length + 2;
-  const totD = ['Defective (1)', ''], totO = ['Observed (1 + 0)', ''], totP = ['% defective', ''];
+  const totD = ['Defective (1)', '', ''], totO = ['Observed (1 + 0)', '', ''], totP = ['% defective', '', ''];
   orderedDefs.forEach((d, i) => {
     const cl = colName(firstC + i); const rg = `${cl}3:${cl}${endU}`;
     const vals = p.units.map(u => (getObs(u.label, d.id) || {}).value);
@@ -888,20 +1208,20 @@ function buildWorkbook() {
   mRows.push(totD, totO, totP);
   const wsM = XLSX.utils.aoa_to_sheet(mRows);
   wsM['!merges'] = merges;
-  wsM['!cols'] = [{ wch: 12 }, { wch: 22 }, ...orderedDefs.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 14 }, { wch: 8 }];
+  wsM['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 10 }, ...orderedDefs.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 14 }, { wch: 8 }];
   orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
 
   /* --- Photo log --- */
-  const pRows = [['Photo', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder']];
+  const pRows = [['Photo', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder']];
   const sortedPh = [...S.photos].sort((a, b) => a.takenAt - b.takenAt);
   for (const ph of sortedPh) {
     const ds = ph.defectIds.map(defectById).filter(Boolean);
-    pRows.push([hyperlink(ph.name, photoPath(ph)), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
+    pRows.push([hyperlink(ph.name, photoPath(ph)), origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
       ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, '')]);
   }
   const wsP = XLSX.utils.aoa_to_sheet(pRows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsP['!cols'] = [{ wch: 30 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }];
-  wsP['!autofilter'] = { ref: `A1:H${Math.max(pRows.length, 2)}` };
+  wsP['!cols'] = [{ wch: 30 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }];
+  wsP['!autofilter'] = { ref: `A1:I${Math.max(pRows.length, 2)}` };
 
   /* --- About --- */
   const info = [
@@ -913,6 +1233,10 @@ function buildWorkbook() {
     ['Observations', 'One row per unit and condition with notes and links to every proof photo. Filter by unit, component or result.'],
     ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
     ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
+    ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component.'],
+    ['Originals folder', 'The same photos under their original file names, unsorted. The Photo Log matches each original to its renamed copy.'],
+    ['Schedule', 'Units marked in the Schedule column of the Unit Matrix were on the visit schedule from the import file.'],
+    ['Added on site', 'Units and conditions marked “added on site” were added in the app rather than coming from the import file.'],
     ['Results', '1 = defective, 0 = not defective, NA = condition doesn’t exist at the unit, NR = not able to be recorded.'],
   ];
   const wsI = XLSX.utils.aoa_to_sheet(info, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' }); wsI['!cols'] = [{ wch: 20 }, { wch: 100 }];
@@ -929,64 +1253,96 @@ function workbookBlob() {
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
+const COPY_LABEL = { r: 'renamed', o: 'original', b: 'renamed + original' };
+function needsExport(ph, copies) { return copies === 'r' ? !ph.exp.r : copies === 'o' ? !ph.exp.o : (!ph.exp.r || !ph.exp.o); }
 function openExport() {
   if (!S.project) return;
-  const all = S.photos, fresh = all.filter(p => !p.exportedAt);
-  const size = a => a.reduce((s, p) => s + (p.size || 0), 0);
+  const onPhone = S.photos.filter(hasBlob);
+  const removed = S.photos.length - onPhone.length;
   const vals = [...S.obs.values()].filter(o => !isGeneral(o.defectId));
   const c1 = vals.filter(o => o.value === '1').length, c0 = vals.filter(o => o.value === '0').length;
   const missing = vals.filter(o => o.value === '1' && !o.photoIds.length).length;
+  const opt = Object.assign({ what: 'both', copies: 'r', scope: 'new' }, S.settings.exportOpt || {});
+  const seg = (name, items) => `<div class="seg" role="radiogroup">${items.map(([v, l]) => `<button role="radio" data-seg="${name}" data-v="${v}" aria-checked="${opt[name] === v}">${l}</button>`).join('')}</div>`;
   openSheet({
     title: 'Export',
     body: `<div class="kv"><span>Defective (1)</span><span>${c1}</span><span>Observed (1 + 0)</span><span>${c1 + c0}</span>
         <span>NA / NR</span><span>${vals.filter(o => o.value === 'NA').length} / ${vals.filter(o => o.value === 'NR').length}</span>
-        <span>Photos</span><span>${all.length} (${mb(size(all))})</span><span>Not yet exported</span><span>${fresh.length} (${mb(size(fresh))})</span></div>
+        <span>Photos on this phone</span><span>${onPhone.length}</span>${removed ? `<span>Removed after export</span><span>${removed}</span>` : ''}</div>
       ${missing ? `<p class="warn">${missing} defective condition${missing > 1 ? 's have' : ' has'} no photo linked.</p>` : ''}
-      <div class="stack" style="margin-top:14px">
-        <button class="btn" id="x-new" ${fresh.length ? '' : 'disabled'}>Spreadsheet + ${fresh.length} new photos</button>
-        <button class="btn ghost" id="x-all" ${all.length ? '' : 'disabled'}>Spreadsheet + all ${all.length} photos</button>
-        <button class="btn ghost" id="x-xls">Spreadsheet only</button>
+      <div class="section-h">What to export</div>${seg('what', [['both', 'Spreadsheet + photos'], ['photos', 'Photos only'], ['xls', 'Spreadsheet only']])}
+      <div id="x-photo-opts">
+        <div class="section-h">Which copies</div>${seg('copies', [['r', 'Renamed'], ['o', 'Originals'], ['b', 'Both']])}
+        <div class="section-h">Which photos</div>${seg('scope', [['new', 'Not yet exported'], ['all', 'All on phone']])}
       </div>
-      <p class="note" style="margin-top:14px">Photos are packed in a ZIP as <b>Photos / Unit / Component / name.jpg</b> with the spreadsheet beside them, so the photo links in the spreadsheet open directly. Save to Files, OneDrive, AirDrop or email from the share sheet.</p>`,
+      <p class="note" id="x-sum" style="margin-top:12px"></p>
+      <p class="note">Renamed copies are sorted into <b>Photos / Unit / Component</b>. Originals go, unsorted, into an <b>Originals</b> folder under their original file names. The spreadsheet sits beside them, so its photo links open directly.</p>`,
+    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="x-go">Export</button>`,
     mount(el, close) {
-      $('#x-xls', el).onclick = () => { close(); exportRun([], true); };
-      $('#x-new', el).onclick = () => { close(); exportRun(fresh, false); };
-      $('#x-all', el).onclick = () => { close(); exportRun(all, false); };
+      const pick = () => opt.what === 'xls' ? [] : onPhone.filter(ph => opt.scope === 'all' || needsExport(ph, opt.copies));
+      const draw = () => {
+        el.querySelectorAll('[data-seg]').forEach(b => b.setAttribute('aria-checked', opt[b.dataset.seg] === b.dataset.v));
+        $('#x-photo-opts', el).hidden = opt.what === 'xls';
+        const ps = pick(); const bytes = ps.reduce((s, p) => s + (p.size || 0), 0) * (opt.copies === 'b' ? 2 : 1);
+        $('#x-sum', el).innerHTML = opt.what === 'xls' ? 'One Excel file.'
+          : `<b>${ps.length} photo${ps.length === 1 ? '' : 's'}</b> (${COPY_LABEL[opt.copies]}) · about ${mb(bytes)}${bytes > (S.settings.partMB || 250) * 1048576 ? ` · split into ${Math.ceil(bytes / ((S.settings.partMB || 250) * 1048576))}+ ZIP parts` : ''}`;
+        $('#x-go', el).disabled = opt.what === 'photos' && !ps.length;
+      };
+      draw();
+      el.addEventListener('click', async e => {
+        const b = e.target.closest('[data-seg]'); if (b) { opt[b.dataset.seg] = b.dataset.v; draw(); return; }
+        if (e.target.id === 'x-go') {
+          S.settings.exportOpt = { ...opt }; await saveSettings();
+          const ps = pick();
+          if (opt.what !== 'xls' && !ps.length && opt.what === 'both' && !await confirmSheet('No photos to add', 'All of these photos have already been exported. Export the spreadsheet on its own?', 'Export spreadsheet')) return;
+          close(); exportRun({ photos: ps, copies: opt.copies, withXls: opt.what !== 'photos' });
+        }
+      });
     }
   });
 }
-async function exportRun(photos, xlsOnly) {
+async function exportRun({ photos, copies, withXls }) {
   const p = S.project; const st = stamp(Date.now());
   const xname = `${safeName(p.number)}_Defects_${st}.xlsx`;
-  busy('Building spreadsheet…');
-  let xblob;
-  try { xblob = workbookBlob(); } catch (e) { busy(null); alertSheet('Export failed', String(e.message || e)); return; }
-  if (xlsOnly) { busy(null); shareStep([{ file: new File([xblob], xname, { type: xblob.type }), photos: [] }]); return; }
-  // split into parts by size
+  let xblob = null;
+  if (withXls) {
+    busy('Building spreadsheet…');
+    try { xblob = workbookBlob(); } catch (e) { busy(null); alertSheet('Export failed', String(e.message || e)); return; }
+    busy(null);
+    if (!photos.length) { shareStep([{ file: new File([xblob], xname, { type: xblob.type }), photos: [] }]); return; }
+  }
+  // split into parts by size so the phone doesn't run out of memory
+  const mult = copies === 'b' ? 2 : 1;
   const limit = (S.settings.partMB || 250) * 1048576;
   const parts = []; let cur = [], curSize = 0;
   for (const ph of [...photos].sort((a, b) => a.takenAt - b.takenAt)) {
-    if (cur.length && curSize + (ph.size || 0) > limit) { parts.push(cur); cur = []; curSize = 0; }
-    cur.push(ph); curSize += ph.size || 0;
+    const w = (ph.size || 0) * mult;
+    if (cur.length && curSize + w > limit) { parts.push(cur); cur = []; curSize = 0; }
+    cur.push(ph); curSize += w;
   }
   if (cur.length) parts.push(cur);
   const root = `${safeName(p.number)} Inspection`;
+  const kind = withXls ? 'Export' : (copies === 'o' ? 'Originals' : copies === 'b' ? 'Photos' : 'Renamed');
   const jobs = parts.map((ph, i) => ({ photos: ph, idx: i, total: parts.length,
-    name: `${safeName(p.number)}_Export_${st}${parts.length > 1 ? `_part${i + 1}of${parts.length}` : ''}.zip` }));
-  busy(null);
+    name: `${safeName(p.number)}_${kind}_${st}${parts.length > 1 ? `_part${i + 1}of${parts.length}` : ''}.zip` }));
   shareStep(jobs.map(j => ({ lazy: async () => {
-    busy(`Packing ${j.total > 1 ? `part ${j.idx + 1} of ${j.total} · ` : ''}${j.photos.length} photos…`);
+    const pre = j.total > 1 ? `part ${j.idx + 1} of ${j.total} · ` : '';
+    busy(`Packing ${pre}${j.photos.length} photos…`);
     const zip = new JSZip(); const f = zip.folder(root);
-    f.file(xname, xblob);
+    if (xblob) f.file(xname, xblob);
     for (let k = 0; k < j.photos.length; k++) {
       const ph = j.photos[k]; const b = await get('blobs', ph.id);
-      if (b) f.file(photoPath(ph), b, { binary: true, date: new Date(ph.takenAt) });
-      if (k % 20 === 0) busy(`Packing ${j.total > 1 ? `part ${j.idx + 1} of ${j.total} · ` : ''}${k + 1}/${j.photos.length} photos…`);
+      if (b) {
+        const date = new Date(ph.takenAt);
+        if (copies !== 'o') f.file(photoPath(ph), b, { binary: true, date });
+        if (copies !== 'r') f.file('Originals/' + origNameOf(ph), b, { binary: true, date });
+      }
+      if (k % 20 === 0) busy(`Packing ${pre}${k + 1}/${j.photos.length} photos…`);
     }
     const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true });
     busy(null);
     return new File([blob], j.name, { type: 'application/zip' });
-  }, photos: j.photos, label: j.total > 1 ? `Part ${j.idx + 1} of ${j.total}` : 'ZIP' })));
+  }, photos: j.photos, copies, label: j.total > 1 ? `Part ${j.idx + 1} of ${j.total}` : 'ZIP' })));
 }
 function shareStep(steps) {
   let i = 0;
@@ -1007,7 +1363,10 @@ function shareStep(steps) {
             if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: file.name }); ok = true; }
             else { const u = URL.createObjectURL(file); const a = document.createElement('a'); a.href = u; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); ok = true; }
           } catch (e) { if (e && e.name === 'AbortError') { toast('Not saved — tap Save again'); return; } toast('Couldn’t share: ' + (e.message || e)); return; }
-          if (ok && s.photos.length) { const now = Date.now(); for (const ph of s.photos) { ph.exportedAt = now; await savePhotoMeta(ph); } }
+          if (ok && s.photos.length) {
+            const now = Date.now();
+            for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
+          }
           close(); i++; next();
         };
       }
@@ -1019,10 +1378,10 @@ function shareStep(steps) {
 /* ================= Template + demo ================= */
 function templateWorkbook() {
   const wb = XLSX.utils.book_new();
-  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '24-118'], ['Project Name', 'Example Condominiums'], [], ['Fill in the Units and Defects sheets, then import this file in the app.']]);
+  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '24-118'], ['Project Name', 'Example Condominiums'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Number units in the Schedule column (1, 2, 3…) to put them first, in visit order. Leave it blank for units not on the schedule.']]);
   proj['!cols'] = [{ wch: 18 }, { wch: 40 }];
-  const units = XLSX.utils.aoa_to_sheet([['Unit', 'Address'], ['101', '1200 Example Way #101'], ['102', '1200 Example Way #102'], ['103', '1200 Example Way #103'], ['201', '1200 Example Way #201'], ['202', '1200 Example Way #202'], ['203', '1200 Example Way #203']]);
-  units['!cols'] = [{ wch: 10 }, { wch: 32 }];
+  const units = XLSX.utils.aoa_to_sheet([['Unit', 'Address', 'Schedule'], ['101', '1200 Example Way #101', ''], ['102', '1200 Example Way #102', 2], ['103', '1200 Example Way #103', ''], ['201', '1200 Example Way #201', 1], ['202', '1200 Example Way #202', ''], ['203', '1200 Example Way #203', 3]]);
+  units['!cols'] = [{ wch: 10 }, { wch: 32 }, { wch: 10 }];
   const defects = XLSX.utils.aoa_to_sheet([['Component', 'Code', 'Defect'], ...DEMO_DEFECTS]);
   defects['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 60 }];
   XLSX.utils.book_append_sheet(wb, proj, 'Project');
