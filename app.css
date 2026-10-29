@@ -432,3 +432,14 @@ html:not(.zoom-locked) button { touch-action: manipulation; }   /* fast taps on 
 .toggle-row { align-items: flex-start; margin-bottom: 16px; }
 .toggle-row .hint { display: block; font-weight: 400; color: var(--muted); font-size: 14px; margin-top: 2px; }
 .toggle-row input { margin-top: 2px; flex: 0 0 auto; }
+
+/* ---------- v1.7.0 ---------- */
+/* Update ready: tap to restart (never reloads by itself mid-session) */
+.upd-banner { position: fixed; left: 12px; right: 12px; top: calc(var(--safe-t) + 8px); z-index: 60; border: 0; border-radius: 12px; padding: 12px 14px; background: var(--focus); color: #fff; font-size: 16px; text-align: left; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+/* Opened in a Safari tab, not the Home Screen app */
+.browser-banner { position: sticky; top: 0; z-index: 21; background: #FFD60A; color: #000; font-size: 14px; font-weight: 600; padding: calc(var(--safe-t) + 6px) 12px 6px; text-align: center; }
+html.in-browser .tag { top: var(--bb-h, 32px); }
+/* Photo viewer zoom */
+.viewer-wrap { overflow: hidden; border-radius: 8px; background: #000; }
+.viewer-wrap .viewer-img { border-radius: 0; touch-action: none; transform-origin: center center; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; will-change: transform; }
+.viewer-hint { margin: 4px 0 0; font-size: 13px; }

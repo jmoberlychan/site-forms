@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -65,6 +65,7 @@ async function loadAll() {
   await activate(p);
 }
 async function activate(p) {
+  await flushNotes();
   S.project = p || null;
   S.obs.clear(); S.photos = []; S.selecting.clear(); S.openNotes.clear();
   thumbURL.forEach(u => URL.revokeObjectURL(u)); thumbURL.clear();
@@ -84,16 +85,26 @@ async function activate(p) {
 /* ================= Helpers ================= */
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const slug = s => String(s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'x';
+// Short stable hash (FNV-1a) so names with no Latin letters or digits still get distinct ids
+const shortHash = s => { let h = 0x811c9dc5; for (const ch of String(s).normalize('NFC')) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(36); };
+const slug = s => String(s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'u' + shortHash(s);
 const safeName = s => String(s).replace(/[\\/:*?"<>|#%]+/g, '-').replace(/\s+/g, ' ').trim().replace(/^\.+/, '') || 'Unnamed';
 const pad = (n, w) => String(n).padStart(w, '0');
 function dateKey(t) { const d = new Date(t); return d.getFullYear() + pad(d.getMonth() + 1, 2) + pad(d.getDate(), 2); }
-function stamp(t) { const d = new Date(t); return dateKey(t) + '-' + pad(d.getHours(), 2) + pad(d.getMinutes(), 2); }
+function stamp(t) { const d = new Date(t); return dateKey(t) + '-' + pad(d.getHours(), 2) + pad(d.getMinutes(), 2) + pad(d.getSeconds(), 2); }   // yyyymmdd-hhmmss: two exports never share a name
 function fmtTime(t) { return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function defectsFor(component) { return S.project.defects.filter(d => d.component === component); }
 function defectById(id) { return S.project.defects.find(d => d.id === id); }
-function photoPath(p) { return 'Photos/' + safeName(p.unit) + '/' + safeName(p.component) + '/' + p.name; }
+// Folder names in the sorted export. Names that are already fine on Windows come out unchanged.
+function folderName(s) {
+  let n = safeName(s).replace(/[\u0000-\u001f\u007f]/g, '');
+  if (n.length > 40) n = n.slice(0, 40);
+  n = n.replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(n)) n = '_' + n;
+  return n || 'Unnamed';
+}
+function photoPath(p) { return 'Photos/' + folderName(p.unit) + '/' + folderName(p.component) + '/' + p.name; }
 function genericOrigName(t, ext = 'jpg') { const d = new Date(t); return `${ext === 'jpg' ? 'IMG' : 'VID'}_${dateKey(t)}_${pad(d.getHours(), 2)}${pad(d.getMinutes(), 2)}${pad(d.getSeconds(), 2)}.${ext}`; }
 function origNameOf(p) { return p.origName || genericOrigName(p.takenAt, p.ext || 'jpg'); }
 const isVideo = p => p && p.kind === 'video';
@@ -139,6 +150,7 @@ function unitsInOrder() {
   return [...sch, ...rest].map(x => x.u);
 }
 const isAddedComp = c => (S.project.addedComps || []).includes(c);
+const isOrphanComp = c => (S.project.orphanComps || []).includes(c);
 function mb(n) { return (n / 1048576).toFixed(n > 1048576 * 100 ? 0 : 1) + ' MB'; }
 
 let toastT;
@@ -159,7 +171,11 @@ function findHeader(rows, tests) {
   for (let r = 0; r < Math.min(rows.length, 8); r++) {
     const row = rows[r] || [];
     const hit = {};
-    row.forEach((c, i) => { const n = norm(c); for (const k in tests) if (hit[k] == null && tests[k].test(n)) hit[k] = i; });
+    // a test can be a list of patterns in priority order: the column matching the earliest pattern wins
+    for (const k in tests) {
+      const list = [].concat(tests[k]); let best = Infinity;
+      row.forEach((c, i) => { const n = norm(c); const r = list.findIndex(re => re.test(n)); if (r >= 0 && r < best) { best = r; hit[k] = i; } });
+    }
     if (Object.keys(tests).every(k => k.startsWith('opt') || hit[k] != null)) return { row: r, cols: hit };
   }
   return null;
@@ -200,20 +216,28 @@ function parseWorkbook(wb, fileName) {
     }
   }
   // Units (+ optional Schedule column)
-  const UNIT_RE = /^(unit|units|unit #|unit no\.?|unit number|unit address|address|addresses|unit id)$/;
+  const UNIT_ONLY = [/^(unit|units|unit #|unit no\.?|unit number|unit address|unit id)$/, /^unit/];
+  const ADDR_RE = /^(address|addresses)$/;
+  const UNIT_RE = [...UNIT_ONLY, ADDR_RE];           // a "Unit…" column always wins over "Address"
   const SCHED_RE = /^(schedule|scheduled|schedule order|schedule #|visit|visit order|visit #|visit no\.?|order|priority|sequence|seq)$/;
   const isSchedSheet = s => /schedule/i.test(s.name);
   const schedValue = (raw, rowIdx) => {
     const t = String(raw ?? '').trim(); if (!t) return null;
     const n = Number(t.replace(/[^0-9.\-]/g, ''));
     if (/^[#\s]*-?\d+(\.\d+)?$/.test(t)) return n;
-    const dt = Date.parse(t); if (!isNaN(dt)) return dt / 1e8; // a visit date: earlier first
-    if (/^(x|y|yes|✓|true|scheduled)$/i.test(t)) return 1e6 + rowIdx; // ticked: keep sheet order
-    return null;
+    // a visit date (m/d/yy, m/d/yyyy or yyyy-mm-dd), parsed by hand so every phone reads it the same: earlier first
+    let m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/), y, mo, d;
+    if (m) { mo = +m[1]; d = +m[2]; y = +m[3]; if (y < 100) y += 2000; }
+    else if ((m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+    if (m && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return Date.UTC(y, mo - 1, d) / 1e8;
+    return 1e6 + rowIdx;  // anything else ("x", "yes", "9:30 AM"…): scheduled, in sheet order, showing the text
   };
   let units = [];
+  // first look for a "Unit" column on any sheet; use an "Address" column only if no sheet has one
+  for (const unitTest of [UNIT_ONLY, ADDR_RE]) {
+  if (units.length) break;
   for (const s of [...sheets].filter(x => !isSchedSheet(x)).sort((a, b) => (/unit|address/i.test(b.name) ? 1 : 0) - (/unit|address/i.test(a.name) ? 1 : 0))) {
-    const h = findHeader(s.rows, { unit: UNIT_RE, optDesc: /^(address|description|location|notes|building|bldg|street address)$/, optSched: SCHED_RE });
+    const h = findHeader(s.rows, { unit: unitTest, optDesc: /^(address|description|location|notes|building|bldg|street address)$/, optSched: SCHED_RE });
     if (!h) continue;
     s.rows.slice(h.row + 1).forEach((r, ri) => {
       const u = String(r[h.cols.unit] ?? '').trim(); if (!u) return;
@@ -223,6 +247,7 @@ function parseWorkbook(wb, fileName) {
       if (!units.some(x => x.label === u)) units.push({ label: u, desc, sched, schedLabel: sched != null ? schedRaw : '' });
     });
     if (units.length) break;
+  }
   }
   // Separate "Schedule" sheet: units listed in visit order (overrides any Schedule column)
   const ss = sheets.find(isSchedSheet);
@@ -255,7 +280,10 @@ async function importProjectFile(file) {
   busy('Reading ' + file.name + '…');
   try {
     const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: 'array' });
+    // CSV: read as UTF-8 text (drop the byte-order mark) so accented and non-Latin names survive
+    const wb = /\.csv$/i.test(file.name) || /csv/i.test(file.type || '')
+      ? XLSX.read(new TextDecoder('utf-8').decode(buf).replace(/^\uFEFF/, ''), { type: 'string' })
+      : XLSX.read(buf, { type: 'array' });
     const parsed = parseWorkbook(wb, file.name);
     busy(null);
     const problems = [];
@@ -269,30 +297,49 @@ async function importProjectFile(file) {
 }
 
 // Combine a fresh import with what's already on the phone.
-// Imported items come from the file (locked). Items added on site are kept.
-// Anything previously imported that has results or photos is kept too, so a re-import never loses data.
+// - Conditions are matched old -> new by id, then by code within the same component, then by name within the
+//   same component. A match keeps the OLD id, so results, notes and photos follow a corrected name or code.
+// - Items added on site are kept. Anything else no longer in the file is kept only if it has data, marked
+//   orphan ("No longer in the import file"); orphans can be deleted in Edit lists.
 async function mergeLists(old, parsed) {
-  const units = parsed.units.map(u => ({ ...u, added: false }));
-  const defects = parsed.defects.map(d => ({ ...d, added: false }));
+  const units = parsed.units.map(u => ({ ...u, added: false, orphan: false }));
+  const defects = parsed.defects.map(d => ({ ...d, added: false, orphan: false }));
   const components = [...parsed.components];
-  let kept = 0;
+  let kept = 0, carried = 0;
+  const orphanComps = [];
   if (old) {
     const obs = await byProject('obs', old.id);
     const photos = await byProject('photos', old.id);
-    const usedUnits = new Set([...obs.filter(o => o.value || o.notes || (o.photoIds || []).length).map(o => o.unit), ...photos.map(p => p.unit)]);
-    const usedDefs = new Set(obs.filter(o => o.value || o.notes || (o.photoIds || []).length).map(o => o.defectId));
+    const live = obs.filter(o => o.value || o.notes || (o.photoIds || []).length);
+    const usedUnits = new Set([...live.map(o => o.unit), ...photos.map(p => p.unit)]);
+    const usedDefs = new Set([...live.map(o => o.defectId), ...photos.flatMap(p => p.defectIds || [])]);
+    const lc = v => String(v || '').trim().toLowerCase();
+    const taken = new Set(), match = new Map();
+    const pass = test => { for (const od of old.defects) { if (match.has(od)) continue; const nd = defects.find(x => !taken.has(x) && test(od, x)); if (nd) { taken.add(nd); match.set(od, nd); } } };
+    pass((od, x) => x.id === od.id);
+    pass((od, x) => od.code && x.component === od.component && lc(x.code) === lc(od.code));
+    pass((od, x) => x.component === od.component && lc(x.label) === lc(od.label));
+    for (const od of old.defects) {
+      const nd = match.get(od);
+      if (nd) {
+        if (nd.id !== od.id && !defects.some(x => x !== nd && x.id === od.id)) { nd.id = od.id; carried++; }
+        continue;
+      }
+      if (od.added) defects.push({ ...od, orphan: false });
+      else if (usedDefs.has(od.id)) { defects.push({ ...od, orphan: true }); kept++; }
+      else continue;
+      if (!components.includes(od.component)) components.push(od.component);
+    }
     for (const u of old.units) {
       if (units.some(x => x.label === u.label)) continue;
-      if (u.added || usedUnits.has(u.label)) { units.push({ ...u }); if (!u.added) kept++; }
-    }
-    for (const d of old.defects) {
-      if (defects.some(x => x.id === d.id)) continue;
-      if (d.added || usedDefs.has(d.id)) { defects.push({ ...d }); if (!d.added) kept++; if (!components.includes(d.component)) components.push(d.component); }
+      if (u.added) units.push({ ...u, orphan: false });
+      else if (usedUnits.has(u.label)) { units.push({ ...u, orphan: true }); kept++; }
     }
     for (const c of old.addedComps || []) if (!components.includes(c)) components.push(c);
+    for (const c of components) if (!parsed.components.includes(c) && !(old.addedComps || []).includes(c) && !defects.some(d => d.component === c && d.added)) orphanComps.push(c);
   }
   const addedComps = components.filter(c => !parsed.components.includes(c) && (old && ((old.addedComps || []).includes(c) || defects.some(d => d.component === c && d.added))));
-  return { units, defects, components, addedComps, kept };
+  return { units, defects, components, addedComps, orphanComps, kept, carried };
 }
 
 function confirmImport(parsed) {
@@ -310,19 +357,25 @@ function confirmImport(parsed) {
       ${existing ? '<p class="note">A project with this number is already on this phone. Its lists will be updated from this file. Units, components and defects you added on site are kept, and so is anything that already has results or photos.</p>' : ''}`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="do-import">${existing ? 'Update lists' : 'Create project'}</button>`,
     mount(el, close) {
-      $('#do-import', el).onclick = async () => {
+      const go = $('#do-import', el);
+      go.onclick = async () => {
+        if (go.disabled) return;
         const number = $('#pnum', el).value.trim();
         if (!number) { $('#pnum', el).focus(); toast('Enter a project number'); return; }
-        const target = S.projects.find(p => p.number.toLowerCase() === number.toLowerCase());
+        go.disabled = true;                                    // a second tap can't create a second project
+        try {
+        // check what's actually saved right now (not just what's in memory)
+        const target = (await getAll('projects')).find(p => projNumKey(p.number) === projNumKey(number));
         const p = target || { id: uid(), createdAt: Date.now(), state: {} };
         const m = await mergeLists(target, parsed);
-        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps });
+        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps, orphanComps: m.orphanComps });
         await put('projects', { ...p, updatedAt: Date.now() });
         S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         await activate(S.projects.find(x => x.id === p.id));
         close(); render();
-        toast(target ? (m.kept ? `Lists updated · ${m.kept} item${m.kept > 1 ? 's' : ''} with data kept` : 'Lists updated') : 'Project created');
+        toast(target ? ['Lists updated', m.carried ? `${m.carried} renamed condition${m.carried > 1 ? 's' : ''} kept ${m.carried > 1 ? 'their' : 'its'} results` : '', m.kept ? `${m.kept} item${m.kept > 1 ? 's' : ''} no longer in the file kept (they have data)` : ''].filter(Boolean).join(' · ') : 'Project created');
         if (!S.project.state.unit) pickUnit();
+        } catch (err) { go.disabled = false; alertSheet('Couldn’t save the project', String(err && err.message || err)); }
       };
     }
   });
@@ -344,17 +397,29 @@ function canvasBlob(img, maxSide, q) {
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   return new Promise(res => c.toBlob(b => res(b), 'image/jpeg', q));
 }
+// Daily photo numbers are counted per PROJECT NUMBER + initials + day (not per stored project), so deleting and
+// re-creating a project, or two projects with the same number, can never reuse a photo name. Counters are never deleted.
+const projNumKey = n => String(n || '').trim().toLowerCase();
 async function nextSeq(initials, dk) {
-  const k = 'seq|' + S.project.id + '|' + initials + '|' + dk;
+  const k = 'seqn|' + projNumKey(S.project.number) + '|' + initials + '|' + dk;
+  let base = null;
+  if (!(await get('meta', k))) {
+    // first photo of the day under this counter: carry on from anything already used (older counter, existing photos)
+    const old = await get('meta', 'seq|' + S.project.id + '|' + initials + '|' + dk);
+    let hi = old ? old.n : 0;
+    for (const p of S.projects.filter(x => projNumKey(x.number) === projNumKey(S.project.number)))
+      for (const ph of await byProject('photos', p.id)) if (ph.initials === initials && dateKey(ph.takenAt) === dk && ph.seq > hi) hi = ph.seq;
+    base = hi;
+  }
   const d = await db(); const t = d.transaction('meta', 'readwrite'); const st = t.objectStore('meta');
-  const cur = await reqP(st.get(k)); const n = (cur ? cur.n : 0) + 1; st.put({ k, n }); await txDone(t);
+  const cur = await reqP(st.get(k)); const n = (cur ? cur.n : (base || 0)) + 1; st.put({ k, n }); await txDone(t);
   return n;
 }
 let persistAsked = false;
 async function addPhotos(files, linkDefectId) {
   const { unit, component } = ctx();
   const initials = S.settings.initials;
-  const added = [];
+  const added = [], failed = [];
   const list = [...files];
   for (let i = 0; i < list.length; i++) {
     const f = list[i];
@@ -368,7 +433,9 @@ async function addPhotos(files, linkDefectId) {
         thumb = await videoThumb(f); // videos are kept exactly as recorded
       } else {
         const img = await loadImg(f);
+        const isJpeg = /^image\/jpe?g$/i.test(f.type || '') || (!f.type && /\.jpe?g$/i.test(f.name || ''));
         if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) full = await canvasBlob(img, S.settings.photoMax, 0.88);
+        else if (!isJpeg) full = await canvasBlob(img, 1e9, 0.92);   // PNG / HEIC etc.: a real JPEG at full size, matching the .jpg name
         thumb = await canvasBlob(img, 320, 0.7);
       }
       const takenAt = Date.now();
@@ -388,12 +455,46 @@ async function addPhotos(files, linkDefectId) {
       await txDone(t);
       S.photos.push(meta); added.push(meta);
       if (linkDefectId) await linkPhoto(meta, linkDefectId, null, true);
-    } catch (e) { toast('A photo could not be saved: ' + (e.message || e)); }
+    } catch (e) { failed.push({ file: f, err: e }); }
   }
   busy(null);
+  if (failed.length) rescueFiles(failed);
   if (!persistAsked && navigator.storage && navigator.storage.persist) { persistAsked = true; navigator.storage.persist().catch(() => {}); }
   checkStorage();
   return added;
+}
+// A photo or video that couldn't be stored (usually: storage full) is not thrown away —
+// it's kept in memory and offered to the share sheet so it can be saved to Files.
+function rescueFiles(failed) {
+  const full = failed.some(x => x.err && /quota|space|storage/i.test((x.err.name || '') + ' ' + (x.err.message || '')));
+  const files = failed.map(x => x.file);
+  const n = files.length, what = n === 1 ? 'this photo' : `these ${n} photos`;
+  openSheet({
+    title: full ? 'Phone storage is full' : 'Couldn’t save ' + (n === 1 ? 'the photo' : n + ' photos'),
+    modal: true,
+    body: `<p>${full ? 'There isn’t enough space to keep' : 'The app couldn’t store'} ${what} (${esc(failed[0].err && (failed[0].err.message || failed[0].err.name) || 'unknown error')}).</p>
+      <p class="note">Save ${what} to Files now so ${n === 1 ? 'it isn’t' : 'they aren’t'} lost, then free up space: export, then Settings → Free up space.</p>`,
+    foot: `<button class="btn ghost" id="r-skip">Discard</button><button class="btn" id="r-save">Save ${n === 1 ? 'photo' : n + ' photos'} to Files</button>`,
+    mount(el, close) {
+      $('#r-save', el).onclick = async () => {
+        try {
+          if (navigator.canShare && navigator.canShare({ files })) await navigator.share({ files, title: 'Site Defects photos' });
+          else files.forEach(f => { const u = URL.createObjectURL(f); const a = document.createElement('a'); a.href = u; a.download = f.name || 'photo.jpg'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); });
+          close(); toast('Saved outside the app — import it later with Menu → Add photos from library');
+        } catch (e) { if (!(e && e.name === 'AbortError')) toast('Couldn’t share: ' + (e.message || e)); }
+      };
+      $('#r-skip', el).onclick = async () => { if (await confirmSheet('Discard?', `Discard ${what}? ${n === 1 ? 'It isn’t' : 'They aren’t'} saved anywhere else.`, 'Discard', true)) close(); };
+    }
+  });
+}
+// Storage almost full: refuse to open a camera (the photo would have nowhere to go).
+let storageFrac = 0;
+async function refreshStorage() { const s = await storageInfo(); storageFrac = s && s.quota ? s.used / s.quota : 0; return s; }
+function storageBlocked() {
+  if (storageFrac <= 0.95) return false;
+  alertSheet('Storage is full', `This app has used ${Math.round(storageFrac * 100)}% of the space iOS allows it, so new photos can’t be saved.\n\nExport your photos, then use Settings → Free up space. Freeing space elsewhere on the iPhone also helps.`);
+  refreshStorage();
+  return true;
 }
 // Warn when the phone's space for this app is getting full.
 let lastStorageWarn = 0;
@@ -402,7 +503,7 @@ async function storageInfo() {
   return null;
 }
 async function checkStorage(force) {
-  const s = await storageInfo(); if (!s || !s.quota) return;
+  const s = await refreshStorage(); if (!s || !s.quota) return;
   const frac = s.used / s.quota;
   if (frac > 0.8 && (force || Date.now() - lastStorageWarn > 10 * 60 * 1000)) {
     lastStorageWarn = Date.now();
@@ -413,9 +514,13 @@ async function savePhotoMeta(p) { await put('photos', p); }
 async function linkPhoto(photo, defectId, setValue, skipPhotoSave) {
   const unit = photo.unit;
   const d = defectById(defectId);
-  if (d && !photo.defectIds.length && d.component !== photo.component) {
+  // An unlinked photo linked to another component's condition moves into that component's folder —
+  // unless its full-size file was already exported and removed (Free up space): then it stays where it was
+  // exported, so the spreadsheet link keeps pointing at the real file.
+  if (d && !photo.defectIds.length && d.component !== photo.component && !photo.removed) {
     photo.takenDuring = photo.takenDuring || photo.component;   // remembered for the Photo Log
     photo.component = d.component;                              // exported into the component it proves
+    if (photo.exp) photo.exp.r = null;                          // the sorted copy's folder changed: export it again
   }
   const o = await ensureObs(unit, defectId);
   if (!o.photoIds.includes(photo.id)) o.photoIds.push(photo.id);
@@ -462,7 +567,12 @@ function thumbHTML(p, opts = {}) {
   return `<button class="thumb${sel ? ' sel' : ''}" data-photo="${p.id}" aria-label="Photo ${esc(p.name)}">
     <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}</button>`;
 }
-function photoById(id) { return S.photos.find(p => p.id === id); }
+// Index of photos by id, rebuilt automatically whenever the photo list is replaced or grows/shrinks
+let pIdx = null, pIdxArr = null, pIdxLen = -1;
+function photoById(id) {
+  if (pIdxArr !== S.photos || pIdxLen !== S.photos.length) { pIdx = new Map(S.photos.map(p => [p.id, p])); pIdxArr = S.photos; pIdxLen = S.photos.length; }
+  return pIdx.get(id);
+}
 // Unlinked photos belong to the unit, not the component: any component at the same unit can use them.
 function trayPhotos() {
   const { unit, component } = ctx();
@@ -481,10 +591,20 @@ let pendingCapture = null;
 let batch = null; // photos taken in the current batch, assigned together once it's full
 function capture(defectId, continuing) {
   if (!requireContext()) return;
+  if (storageBlocked()) return;
   if (!continuing || !batch) batch = { defectId: defectId || null, photos: [] };
   if (S.settings.camera === 'builtin' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) { openCamera(); return; }
   pendingCapture = { defectId: batch.defectId };
-  const inp = $('#cam-input'); inp.value = ''; inp.click();
+  const inp = $('#cam-input'); inp.value = ''; watchPicker(inp); inp.click();
+}
+// The iPhone camera / library picker: notice when it's cancelled, so a stale "picking" state can't block updates.
+let lastCapture = null;
+function watchPicker(inp) {
+  lastCapture = pendingCapture;
+  const clear = () => setTimeout(() => { if (!inp.files || !inp.files.length) { pendingCapture = null; if (batch && !batch.photos.length) batch = null; } }, 1500);
+  inp.oncancel = () => { pendingCapture = null; if (batch && !batch.photos.length) batch = null; };
+  window.addEventListener('focus', clear, { once: true });
+  document.addEventListener('visibilitychange', function v() { if (!document.hidden) { document.removeEventListener('visibilitychange', v); clear(); } });
 }
 function batchSize() { return Math.min(10, Math.max(1, S.settings.batch || 1)); }
 async function setBatchSize(n) {
@@ -512,9 +632,9 @@ function finishBatch() {
 function batchSheet() {
   const b = batch;
   const d = b.defectId ? defectById(b.defectId) : null;
-  let draw = null;
+  let draw = null, handled = false;
   openSheet({
-    title: 'Photo saved', body: '', foot: ' ',
+    title: 'Photo saved', body: '', foot: ' ', modal: true,   // an outside tap can't drop the batch
     mount(el, close) {
       draw = () => {
         const n = b.photos.length, N = batchSize();
@@ -529,21 +649,22 @@ function batchSheet() {
       draw();
       document.addEventListener('batchchange', draw);
       el.addEventListener('click', e => {
-        if (e.target.id === 'b-next') { close(); capture(b.defectId, true); }
-        if (e.target.id === 'b-done') { close(); finishBatch(); }
+        if (e.target.id === 'b-next') { handled = true; close(); capture(b.defectId, true); }
+        if (e.target.id === 'b-done') { handled = true; close(); finishBatch(); }
       });
     },
-    onClose() { document.removeEventListener('batchchange', draw); }
+    onClose() { document.removeEventListener('batchchange', draw); if (!handled) finishBatch(); }   // header "Done" also finishes the batch
   });
 }
 function fromLibrary() {
   if (!requireContext()) return;
   pendingCapture = { defectId: null, library: true };
-  const inp = $('#lib-input'); inp.value = ''; inp.click();
+  const inp = $('#lib-input'); inp.value = ''; watchPicker(inp); inp.click();
 }
 async function onFilesChosen(e) {
-  const files = e.target.files; if (!files || !files.length || !pendingCapture) return;
-  const pc = pendingCapture; pendingCapture = null;
+  const files = e.target.files; if (!files || !files.length) return;
+  // the picker can report late (after the cancel fallback cleared it): fall back to the last request
+  const pc = pendingCapture || lastCapture || { defectId: null }; pendingCapture = null;
   const added = await addPhotos(files, pc.defectId);
   if (!added.length) return;
   render();
@@ -570,6 +691,7 @@ const CAM = { el: null, stream: null, track: null, mode: 'photo', rec: null, chu
   lenses: [], lensId: null, torch: false, busy: false, starting: false, zoom: 1, native: null, optsOpen: false,
   focusLocked: false, focusTold: false, ro: null };
 const REC_MAX_SEC = 300;
+const REC_MAX_BYTES = 300 * 1048576;   // stop a recording at about 300 MB so the phone doesn't run out of memory
 const VQ = { '1080': { w: 1920, h: 1080, bps: 12e6, label: '1080p' }, '4k': { w: 3840, h: 2160, bps: 25e6, label: '4K' } };
 const ICON = {
   flashOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.2 2.5 5 13.6h6.1l-1.3 7.9 8.2-11.1h-6.1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4.5 3.5l15 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
@@ -1238,8 +1360,8 @@ async function snapPhoto() {
     const g = c.getContext('2d');
     g.translate(c.width / 2, c.height / 2); g.rotate(r * Math.PI / 180);
     g.drawImage(v, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);          // digital zoom = centre crop, no upscaling
-    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
-    await camSave(new File([blob], 'capture.jpg', { type: 'image/jpeg' }));
+    // hand the save over straight away (before the JPEG is encoded) so a quick Done waits for it
+    await camSave(new Promise(r => c.toBlob(r, 'image/jpeg', 0.92)).then(blob => blob && new File([blob], 'capture.jpg', { type: 'image/jpeg' })));
   } finally { CAM.busy = false; }
 }
 function toggleRecord() {
@@ -1258,7 +1380,8 @@ function toggleRecord() {
   try { rec = new MediaRecorder(recStream, { mimeType: mime, videoBitsPerSecond: (VQ[S.settings.vidQ] || VQ['1080']).bps }); }
   catch (_) { try { rec = new MediaRecorder(recStream); } catch (e) { toast('Can’t record video here'); return; } }
   CAM.chunks = []; CAM.rec = rec; CAM.recStart = Date.now(); CAM.optsOpen = false;
-  rec.ondataavailable = e => { if (e.data && e.data.size) CAM.chunks.push(e.data); };
+  CAM.recBytes = 0;
+  rec.ondataavailable = e => { if (e.data && e.data.size) { CAM.chunks.push(e.data); CAM.recBytes += e.data.size; } };
   rec.onstop = async () => {
     clearInterval(CAM.recTimer); CAM.rec = null; stopRotatedTrack();
     const type = (rec.mimeType || mime || 'video/mp4').split(';')[0];
@@ -1270,21 +1393,31 @@ function toggleRecord() {
   rec.start(1000);
   const t = $('.cam-timer', CAM.el);
   const tick = () => {
-    const sec = Math.floor((Date.now() - CAM.recStart) / 1000);
-    t.textContent = `${pad(Math.floor(sec / 3600), 2)}:${pad(Math.floor(sec / 60) % 60, 2)}:${pad(sec % 60, 2)}`;
-    t.classList.toggle('ending', sec >= REC_MAX_SEC - 30);
-    if (sec >= REC_MAX_SEC && CAM.rec) { toast('Recording stopped at 5 minutes'); CAM.rec.stop(); }
+    const el = (Date.now() - CAM.recStart) / 1000, sec = Math.floor(el);
+    // time left = whichever runs out first: the 5-minute limit or the ~300 MB size limit (a video is held in memory until it stops)
+    const rate = el > 2 && CAM.recBytes ? CAM.recBytes / el : 0;
+    const left = Math.max(0, Math.floor(Math.min(REC_MAX_SEC - el, rate ? (REC_MAX_BYTES - CAM.recBytes) / rate : Infinity)));
+    t.textContent = `${pad(Math.floor(sec / 3600), 2)}:${pad(Math.floor(sec / 60) % 60, 2)}:${pad(sec % 60, 2)} · ${Math.floor(left / 60)}:${pad(left % 60, 2)} left`;
+    t.classList.toggle('ending', left <= 30);
+    if (!CAM.rec || CAM.rec.state === 'inactive') return;
+    if (sec >= REC_MAX_SEC) { toast('Recording stopped at 5 minutes'); CAM.rec.stop(); }
+    else if (CAM.recBytes + rate * 1.5 >= REC_MAX_BYTES) { toast('Recording stopped at 300 MB — start a new video to keep going'); CAM.rec.stop(); }
   };
   tick(); CAM.recTimer = setInterval(tick, 500);
   camUpdate();
 }
-async function camSave(file) {
-  if (!batch) batch = { defectId: null, photos: [] };
-  const added = await addPhotos([file], batch.defectId);
+// Saves into the batch that was open when the shutter was pressed, even if Done is tapped mid-save;
+// closeCamera waits for saves still in progress before it links the batch.
+async function camSave(fileOrPromise) {
+  const b = batch || (batch = { defectId: null, photos: [] });
+  if (!CAM.saving) CAM.saving = new Set();
+  const job = Promise.resolve(fileOrPromise).then(file => file ? addPhotos([file], b.defectId) : []).then(added => { b.photos.push(...added); return added; });
+  CAM.saving.add(job);
+  let added = [];
+  try { added = await job; } finally { CAM.saving.delete(job); }
   if (!added.length) return;
-  batch.photos.push(...added);
   render(); camUpdate();
-  if (batch.photos.length >= batchSize()) { await closeCamera(false); finishBatch(); }
+  if (CAM.el && b === batch && b.photos.length >= batchSize()) { await closeCamera(false); finishBatch(); }
 }
 function stopTracks() {
   if (CAM.stream) CAM.stream.getTracks().forEach(t => t.stop());
@@ -1292,13 +1425,14 @@ function stopTracks() {
 }
 function closeCamera(finish) {
   return new Promise(res => {
-    const done = () => {
+    const done = async () => {
       stopTracks(); dropAudio(); stopRotatedTrack(); stopMotion(); clearInterval(CAM.recTimer);
       if (CAM.ro) { CAM.ro.disconnect(); CAM.ro = null; }
       if (CAM.el) { CAM.el.remove(); CAM.el = null; }
       document.documentElement.classList.remove('cam-open');
       document.removeEventListener('batchchange', camUpdate);
       document.removeEventListener('visibilitychange', camVisibility);
+      if (CAM.saving && CAM.saving.size) await Promise.all([...CAM.saving]);   // photos still being saved join the batch first
       if (finish) finishBatch();
       res();
     };
@@ -1314,14 +1448,15 @@ window.addEventListener('resize', () => fitViewfinder());
 
 /* ================= Sheets (modal bottom panels) ================= */
 let sheetStack = 0;
-function openSheet({ title, body, foot, mount, onClose }) {
+function openSheet({ title, body, foot, mount, onClose, modal }) {
   const scrim = document.createElement('div'); scrim.className = 'scrim';
   scrim.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
     <div class="sheet-head"><h2>${esc(title)}</h2><button class="close" data-close>Done</button></div>
     <div class="sheet-body">${body || ''}</div>${foot ? `<div class="sheet-foot">${foot}</div>` : ''}</div>`;
   $('#sheet-root').appendChild(scrim); sheetStack++;
   const close = () => { if (!scrim.isConnected) return; scrim.remove(); sheetStack--; onClose && onClose(); };
-  scrim.addEventListener('click', e => { if (e.target === scrim || e.target.closest('[data-close]')) close(); });
+  // modal panels ignore taps outside them (they close only with their own buttons)
+  scrim.addEventListener('click', e => { if ((e.target === scrim && !modal) || e.target.closest('[data-close]')) close(); });
   mount && mount(scrim, close);
   hydrateThumbs(scrim);
   return { el: scrim, close };
@@ -1356,7 +1491,7 @@ function pickUnit() {
   const row = u => {
     const pr = comp ? unitProgress(u.label, comp) : null;
     const done = pr && pr.total && pr.n === pr.total;
-    const subs = [u.desc, u.sched != null && u.schedLabel && !/^\d+$/.test(u.schedLabel) ? 'Scheduled ' + u.schedLabel : '', u.added ? 'Added on site' : ''].filter(Boolean).join(' · ');
+    const subs = [u.desc, u.sched != null && u.schedLabel && !/^\d+$/.test(u.schedLabel) ? 'Scheduled ' + u.schedLabel : '', u.added ? 'Added on site' : u.orphan ? 'No longer in the import file' : ''].filter(Boolean).join(' · ');
     return `<li data-q="${esc((u.label + ' ' + (u.desc || '')).toLowerCase())}"><button data-unit="${esc(u.label)}" aria-current="${u.label === p.state.unit}">
       <span>${u.sched != null ? `<span class="sched">${esc(/^\d+$/.test(u.schedLabel || '') ? u.schedLabel : '•')}</span>` : ''}${esc(u.label)}${subs ? `<span class="sub">${esc(subs)}</span>` : ''}</span>
       ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : (unitAnyData(u.label) ? '<span class="meta">•</span>' : '')}</button></li>`;
@@ -1393,7 +1528,7 @@ function pickComponent() {
     title: 'Which component?',
     body: `<ul class="list">${p.components.map(c => {
       const pr = unit ? unitProgress(unit, c) : null; const done = pr && pr.total && pr.n === pr.total;
-      return `<li><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}${isAddedComp(c) ? '<span class="sub">Added on site</span>' : ''}</span>
+      return `<li><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}${isAddedComp(c) ? '<span class="sub">Added on site</span>' : isOrphanComp(c) ? '<span class="sub">No longer in the import file</span>' : ''}</span>
         ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : ''}</button></li>`;
     }).join('')}</ul>`,
     foot: `<button class="btn ghost" id="add-comp">+ Add component</button>`,
@@ -1481,15 +1616,16 @@ function addDefectSheet() {
 }
 function editListsSheet() {
   const p = S.project;
-  const lockedU = p.units.filter(u => !u.added).length, lockedC = p.components.filter(c => !isAddedComp(c)).length, lockedD = p.defects.filter(d => !d.added).length;
+  const lockedU = p.units.filter(u => !u.added && !u.orphan).length, lockedC = p.components.filter(c => !isAddedComp(c) && !isOrphanComp(c)).length, lockedD = p.defects.filter(d => !d.added && !d.orphan).length;
   const draw = el => {
-    const au = p.units.filter(u => u.added), ac = p.components.filter(isAddedComp), ad = p.defects.filter(d => d.added);
+    const au = p.units.filter(u => u.added || u.orphan), ac = p.components.filter(c => isAddedComp(c) || isOrphanComp(c)), ad = p.defects.filter(d => d.added || d.orphan);
+    const why = x => x === true ? 'No longer in the import file' : '';
     const row = (label, sub, attr) => `<div class="link-row"><span>${esc(label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span><span class="acts"><button class="mini" ${attr}>Delete</button></span></div>`;
     $('.sheet-body', el).innerHTML = `
-      <p class="note">🔒 ${lockedU} units, ${lockedC} components and ${lockedD} conditions came from the import file and can’t be deleted here. Items you added on site are listed below.</p>
-      <div class="section-h">Units added on site</div>${au.length ? au.map(u => row(u.label, u.desc, `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}
-      <div class="section-h">Components added on site</div>${ac.length ? ac.map(c => row(c, '', `data-dc="${esc(c)}"`)).join('') : '<p class="note">None</p>'}
-      <div class="section-h">Conditions added on site</div>${ad.length ? ad.map(d => row((d.code ? d.code + ' ' : '') + d.label, d.component, `data-dd="${d.id}"`)).join('') : '<p class="note">None</p>'}`;
+      <p class="note">🔒 ${lockedU} units, ${lockedC} components and ${lockedD} conditions come from the import file and can’t be deleted here. Below are items added on site, and items that are no longer in the import file but were kept because they had data.</p>
+      <div class="section-h">Units</div>${au.length ? au.map(u => row(u.label, [u.desc, u.orphan ? 'No longer in the import file' : 'Added on site'].filter(Boolean).join(' · '), `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}
+      <div class="section-h">Components</div>${ac.length ? ac.map(c => row(c, isOrphanComp(c) ? 'No longer in the import file' : 'Added on site', `data-dc="${esc(c)}"`)).join('') : '<p class="note">None</p>'}
+      <div class="section-h">Conditions</div>${ad.length ? ad.map(d => row((d.code ? d.code + ' ' : '') + d.label, d.component + ' · ' + (d.orphan ? 'No longer in the import file' : 'Added on site'), `data-dd="${d.id}"`)).join('') : '<p class="note">None</p>'}`;
   };
   openSheet({
     title: 'Edit lists', body: '',
@@ -1510,12 +1646,12 @@ function editListsSheet() {
         }
         if (b.dataset.dc != null) {
           const c = b.dataset.dc;
-          if (p.defects.some(d => d.component === c && !d.added)) { toast('This component has protected conditions'); return; }
+          if (p.defects.some(d => d.component === c && !d.added && !d.orphan)) { toast('This component has protected conditions'); return; }
           if (S.photos.some(ph => ph.component === c)) { alertSheet('Can’t delete this component yet', `${c} has photos. Delete or keep its photos first.`); return; }
           if (!await confirmSheet(`Delete ${c}?`, 'Its added conditions and any results for them will be deleted too.', 'Delete', true)) return;
           const ids = new Set(p.defects.filter(d => d.component === c).map(d => d.id));
           await deleteObsWhere(o => ids.has(o.defectId) || o.defectId === generalId(c));
-          p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c);
+          p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c); p.orphanComps = (p.orphanComps || []).filter(x => x !== c);
           if (p.state.component === c) p.state.component = null;
         }
         if (b.dataset.dd != null) {
@@ -1605,9 +1741,12 @@ function openTray() {
           const ps = [...S.selecting].map(photoById).filter(Boolean);
           const to = await chooseUnit(`Move ${ps.length} photo${ps.length > 1 ? 's' : ''} to which unit?`, ctx().unit);
           if (!to) return;
-          await movePhotosToUnit(ps, to);
+          const from = ctx().unit, r = await movePhotosToUnit(ps, to);
           S.selecting.clear(); draw(el); render();
-          toast(`Moved ${ps.length} photo${ps.length > 1 ? 's' : ''} to unit ${to}`);
+          const pl = n => `${n} photo${n === 1 ? '' : 's'}`;
+          if (r.moved) toast(`Moved ${pl(r.moved)} to unit ${to}`);
+          if (r.removed) alertSheet('Some photos stayed here', `${pl(r.removed)} ${r.removed === 1 ? 'was' : 'were'} already exported and removed from this phone (Free up space), so ${r.removed === 1 ? 'it stays' : 'they stay'} in unit ${from}, where ${r.removed === 1 ? 'it was' : 'they were'} exported.`);
+          else if (!r.moved) toast('Nothing was moved');
         }
         if (e.target.id === 't-del') {
           const ids = [...S.selecting];
@@ -1649,26 +1788,83 @@ function chooseUnit(title, exclude) {
 }
 // Unlinked photos only: they become unlinked photos at the other unit (same component),
 // export into that unit's folder, and are marked for export again.
+// Returns how many were moved and how many were left (already removed from the phone, or linked).
 async function movePhotosToUnit(photos, unit) {
+  const r = { moved: 0, removed: 0, linked: 0 };
   const d = await db(); const t = d.transaction('photos', 'readwrite');
   for (const p of photos) {
-    if (p.defectIds.length || p.unit === unit) continue;
+    if (p.unit === unit) continue;
+    if (p.defectIds.length) { r.linked++; continue; }
+    if (p.removed) { r.removed++; continue; }         // exported and removed: its file can't be exported to a new folder
     if (!p.movedFrom) p.movedFrom = p.unit;
     if (p.movedFrom === unit) delete p.movedFrom;      // moved back where it was taken
-    p.unit = unit; p.exp = { r: null, o: null };
-    t.objectStore('photos').put(p);
+    p.unit = unit;
+    p.exp = { ...(p.exp || {}), r: null };              // only the sorted copy's folder changes; the Unsorted copy is unaffected
+    t.objectStore('photos').put(p); r.moved++;
   }
   await txDone(t);
+  return r;
 }
 
 /* ================= Photo viewer ================= */
+// The viewer's own pinch and double-tap zoom (works with the screen zoom lock on).
+function zoomable(img) {
+  if (!img) return;
+  let s = 1, x = 0, y = 0, start = null, lastTap = 0, moved = 0;
+  const pts = new Map();
+  const box = () => { const r = img.getBoundingClientRect(); return { cx: r.left + r.width / 2 - x, cy: r.top + r.height / 2 - y }; };
+  const clamp = () => {
+    s = Math.min(8, Math.max(1, s));
+    if (s < 1.02) { s = 1; x = y = 0; return; }
+    const mx = img.clientWidth * (s - 1) / 2, my = img.clientHeight * (s - 1) / 2;
+    x = Math.max(-mx, Math.min(mx, x)); y = Math.max(-my, Math.min(my, y));
+  };
+  const apply = () => { img.style.transform = s === 1 ? '' : `translate(${x}px, ${y}px) scale(${s})`; img.classList.toggle('zoomed', s > 1); };
+  const mid = () => { const a = [...pts.values()]; return { x: (a[0].x + a[1].x) / 2, y: (a[0].y + a[1].y) / 2, d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1 }; };
+  const seed = () => {
+    const b = box();
+    if (pts.size >= 2) { const m = mid(); start = { ...b, m, s, ux: (m.x - b.cx - x) / s, uy: (m.y - b.cy - y) / s }; }
+    else if (pts.size === 1) { const p = [...pts.values()][0]; start = { px: p.x, py: p.y, x, y, sc: img.closest('.sheet-body') }; start.top = start.sc ? start.sc.scrollTop : 0; }
+    else start = null;
+  };
+  img.addEventListener('pointerdown', e => { pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); moved = 0; seed(); });
+  img.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId) || !start) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (!img.hasPointerCapture(e.pointerId)) try { img.setPointerCapture(e.pointerId); } catch (_) {}
+    if (pts.size >= 2) {
+      const m = mid(); s = start.s * m.d / start.m.d;
+      x = m.x - start.cx - start.ux * s; y = m.y - start.cy - start.uy * s; moved = 99;
+    } else {
+      const p = [...pts.values()][0], dx = p.x - start.px, dy = p.y - start.py; moved = Math.max(moved, Math.hypot(dx, dy));
+      if (s > 1) { x = start.x + dx; y = start.y + dy; }
+      else if (start.sc) start.sc.scrollTop = start.top - dy;     // not zoomed: a drag scrolls the panel as usual
+    }
+    clamp(); apply();
+  });
+  const up = e => {
+    if (!pts.has(e.pointerId)) return;
+    const p = pts.get(e.pointerId); pts.delete(e.pointerId);
+    if (e.type === 'pointerup' && !pts.size && moved < 10) {
+      const now = Date.now();
+      if (now - lastTap < 320) {                      // double-tap: zoom in on that spot, or back out
+        lastTap = 0;
+        if (s > 1) { s = 1; x = y = 0; }
+        else { const b = box(); const ux = (p.x - b.cx - x) / s, uy = (p.y - b.cy - y) / s; s = 2.5; x = (p.x - b.cx) - ux * s; y = (p.y - b.cy) - uy * s; }
+        clamp(); apply();
+      } else lastTap = now;
+    }
+    seed();
+  };
+  img.addEventListener('pointerup', up); img.addEventListener('pointercancel', up);
+}
 async function viewPhoto(id) {
   const p = photoById(id); if (!p) return;
   const blob = hasBlob(p) ? await get('blobs', id) : null; const url = blob ? URL.createObjectURL(blob) : '';
   const tsrc = url ? '' : await thumbSrc(id);
   const comp = !p.defectIds.length && ctx().unit === p.unit && ctx().component ? ctx().component : p.component; const ds = defectsFor(comp);
   const draw = el => {
-    $('.sheet-body', el).innerHTML = `${isVideo(p) && url ? `<video class="viewer-img" src="${url}" controls playsinline preload="metadata"></video>` : `<img class="viewer-img" src="${url || tsrc}" alt="">`}
+    $('.sheet-body', el).innerHTML = `${isVideo(p) && url ? `<video class="viewer-img" src="${url}" controls playsinline preload="metadata"></video>` : `<div class="viewer-wrap"><img class="viewer-img zoomable" src="${url || tsrc}" alt="" draggable="false"></div><p class="note viewer-hint">Pinch or double-tap the photo to zoom.</p>`}
       ${url ? '' : '<p class="note">The full-size file was exported and removed from this phone to free space. This is the thumbnail.</p>'}
       <div class="fname">${esc(p.name)}</div>
       <div class="path">Original: ${esc(origNameOf(p))}</div>
@@ -1681,13 +1877,13 @@ async function viewPhoto(id) {
   openSheet({
     title: 'Photo', body: '', foot: `<button class="btn danger" id="v-del">Delete photo</button>`,
     mount(el, close) {
-      draw(el);
+      draw(el); zoomable($('.viewer-img.zoomable', el));
       el.addEventListener('click', async e => {
         const b = e.target.closest('[data-unlink],[data-link],[data-link1]');
         if (b) {
           if (b.dataset.unlink) await unlinkPhoto(p, b.dataset.unlink);
           else await linkPhoto(p, b.dataset.link || b.dataset.link1, b.dataset.link1 ? '1' : null);
-          draw(el); render(); return;
+          draw(el); zoomable($('.viewer-img.zoomable', el)); render(); return;
         }
         if (e.target.id === 'v-del' && await confirmSheet('Delete photo?', `Delete ${p.name} from this phone? Its number won’t be reused.`, 'Delete', true)) {
           await deletePhoto(p); close(); render(); toast('Photo deleted');
@@ -1708,18 +1904,39 @@ async function setResult(defectId, v) {
   renderDefect(defectId);
   renderProgress();
 }
-const noteTimers = {};
+// Notes save shortly after typing stops. Each pending note remembers the project and unit it was typed at,
+// so moving to another unit (or project) straight after typing can never put it in the wrong place.
+const noteTimers = new Map();   // "projectId|unit|defectId" -> { pid, unit, defectId, text, t }
 function saveNote(defectId, text) {
-  clearTimeout(noteTimers[defectId]);
-  noteTimers[defectId] = setTimeout(async () => {
-    const o = await ensureObs(ctx().unit, defectId);
-    o.notes = text; o.updatedAt = Date.now(); o.inspector = S.settings.initials;
-    await put('obs', o);
-  }, 350);
+  if (!S.project) return;
+  const pid = S.project.id, unit = ctx().unit, k = pid + '|' + unit + '|' + defectId;
+  const prev = noteTimers.get(k); if (prev) clearTimeout(prev.t);
+  const job = { pid, unit, defectId, text };
+  job.t = setTimeout(() => commitNote(k), 350);
+  noteTimers.set(k, job);
 }
+function commitNote(k) {
+  const j = noteTimers.get(k); if (!j) return Promise.resolve();
+  noteTimers.delete(k); clearTimeout(j.t);
+  const key = j.pid + '|' + j.unit + '|' + j.defectId;
+  const blank = () => {
+    const d = S.project && S.project.id === j.pid ? defectById(j.defectId) : null;
+    return { key, projectId: j.pid, unit: j.unit, defectId: j.defectId, component: d ? d.component : (isGeneral(j.defectId) ? j.defectId.split('::')[1] : ''), value: '', notes: '', photoIds: [], updatedAt: 0 };
+  };
+  if (S.project && S.project.id === j.pid) {          // updated in memory straight away, so a re-draw shows it
+    let o = S.obs.get(key); if (!o) { o = blank(); S.obs.set(key, o); }
+    o.notes = j.text; o.updatedAt = Date.now(); o.inspector = S.settings.initials;
+    return put('obs', o);
+  }
+  return get('obs', key).then(o => { o = o || blank(); o.notes = j.text; o.updatedAt = Date.now(); o.inspector = S.settings.initials; return put('obs', o); });
+}
+function flushNotes() { return Promise.all([...noteTimers.keys()].map(commitNote)); }
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushNotes(); });
+window.addEventListener('pagehide', () => flushNotes());
 
 /* ================= Rendering ================= */
 function render() {
+  flushNotes();                          // pending notes are saved (to where they were typed) before anything re-draws
   const app = $('#app');
   if (!S.settings.initials || !S.project) { renderWelcome(app); return; }
   const p = S.project; const st = p.state;
@@ -1768,7 +1985,7 @@ function defectHTML(d) {
   const photos = o.photoIds.map(photoById).filter(Boolean);
   const open = S.openNotes.has(d.id) || !!o.notes;
   return `<section class="defect" data-d="${d.id}" data-v="${o.value}">
-    <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}${d.added ? ' <span class="added">Added on site</span>' : ''}</h3>
+    <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}${d.added ? ' <span class="added">Added on site</span>' : d.orphan ? ' <span class="added">No longer in the import file</span>' : ''}</h3>
     <div class="results" role="group" aria-label="Result">
       ${RESULTS.map(r => `<button class="res" data-r="${r}" aria-pressed="${o.value === r}">${r}</button>`).join('')}
     </div>
@@ -1977,6 +2194,27 @@ function linkTarget(path) { return encodeURI(path); }
 function hyperlink(text, target) { return { t: 's', v: text, l: { Target: linkTarget(target), Tooltip: 'Open photo' } }; }
 function colName(n) { let s = ''; n++; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
 function cellVal(v) { return v === '1' ? 1 : v === '0' ? 0 : v; }
+// Excel refuses text longer than 32,767 characters in a cell (one long note used to make every export fail).
+const CELL_MAX = 32000;
+function capText(t) { return typeof t === 'string' && t.length > CELL_MAX ? t.slice(0, CELL_MAX) + '… (truncated)' : t; }
+function capCells(rows) {
+  for (const r of rows) for (let i = 0; i < r.length; i++) {
+    const c = r[i];
+    if (typeof c === 'string') r[i] = capText(c);
+    else if (c && typeof c === 'object' && typeof c.v === 'string') c.v = capText(c.v);
+  }
+  return rows;
+}
+// Excel ScreenTips stop at 255 characters.
+function tipList(names) {
+  let out = '';
+  for (let i = 0; i < names.length; i++) {
+    const more = names.length - i, add = (out ? ', ' : '') + names[i];
+    if ((out + add).length > 238 && more > 0) return out + ` +${more} more`;
+    out += add;
+  }
+  return out;
+}
 
 function buildWorkbook() {
   const p = S.project;
@@ -1994,30 +2232,34 @@ function buildWorkbook() {
   /* --- Observations --- */
   const head = ['Unit', 'Component', 'Code', 'Defect condition', 'Result', 'Notes', 'Photo count'];
   for (let i = 1; i <= maxPh; i++) head.push('Photo ' + i);
-  head.push('Inspector', 'Last updated');
+  head.push('Inspector', 'Last updated', 'Condition ID');   // Condition ID: what the Summary formulas count by
+  const idCol = colName(head.length - 1);
   const rows = [head];
   for (const o of allObs) {
     const d = isGeneral(o.defectId) ? { label: 'General notes', code: '' } : (defectById(o.defectId) || { label: o.defectId + ' (removed from list)', code: '' });
     const phs = o.photoIds.map(photoById).filter(Boolean);
     const r = [o.unit, o.component, d.code || '', d.label, cellVal(o.value || ''), o.notes || '', phs.length];
     for (let i = 0; i < maxPh; i++) r.push(phs[i] ? hyperlink(phs[i].name, photoPath(phs[i])) : '');
-    r.push(o.inspector || '', new Date(o.updatedAt));
+    r.push(o.inspector || '', new Date(o.updatedAt), o.defectId);
     rows.push(r);
   }
+  capCells(rows);
   const wsO = XLSX.utils.aoa_to_sheet(rows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsO['!cols'] = [{ wch: 14 }, { wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 8 }, { wch: 40 }, { wch: 7 }, ...Array(maxPh).fill({ wch: 30 }), { wch: 9 }, { wch: 17 }];
+  wsO['!cols'] = [{ wch: 14 }, { wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 8 }, { wch: 40 }, { wch: 7 }, ...Array(maxPh).fill({ wch: 30 }), { wch: 9 }, { wch: 17 }, { wch: 30 }];
   wsO['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(rows.length - 1, 1), c: head.length - 1 } }) };
   const lastRow = rows.length;
 
   /* --- Summary (live formulas against Observations) --- */
-  const sRows = [['Component', 'Code', 'Defect condition', 'Defective (1)', 'Observed (1 + 0)', '% defective', 'NA', 'NR', 'Not yet recorded', 'Source']];
+  // Counted by Condition ID (column K, hidden), never by name: names like ">1/8 in.", "Crack*" or two "Other"s
+  // would otherwise be read by Excel as comparisons, wildcards or the same condition.
+  const sRows = [['Component', 'Code', 'Defect condition', 'Defective (1)', 'Observed (1 + 0)', '% defective', 'NA', 'NR', 'Not yet recorded', 'Source', 'Condition ID']];
   const range = c => `Observations!$${c}$2:$${c}$${Math.max(lastRow, 2)}`;
   p.defects.forEach((d, i) => {
     const r = i + 2;
     const vals = allObs.filter(o => o.defectId === d.id);
     const c1 = vals.filter(o => o.value === '1').length, c0 = vals.filter(o => o.value === '0').length;
     const na = vals.filter(o => o.value === 'NA').length, nr = vals.filter(o => o.value === 'NR').length;
-    const base = `${range('B')},$A${r},${range('D')},$C${r}`;
+    const base = `${range(idCol)},$K${r}`;
     sRows.push([d.component, d.code || '', d.label,
       { t: 'n', v: c1, f: `COUNTIFS(${base},${range('E')},1)` },
       { t: 'n', v: c1 + c0, f: `COUNTIFS(${base},${range('E')},1)+COUNTIFS(${base},${range('E')},0)` },
@@ -2025,8 +2267,9 @@ function buildWorkbook() {
       { t: 'n', v: na, f: `COUNTIFS(${base},${range('E')},"NA")` },
       { t: 'n', v: nr, f: `COUNTIFS(${base},${range('E')},"NR")` },
       { t: 'n', v: p.units.length - (c1 + c0 + na + nr), f: `${p.units.length}-E${r}-G${r}-H${r}` },
-      d.added ? 'Added on site' : 'Import file']);
+      d.added ? 'Added on site' : (d.orphan ? 'No longer in the import file' : 'Import file'), d.id]);
   });
+  capCells(sRows);
   const sr = sRows.length;
   const tot = (col) => ({ t: 'n', v: 0, f: `SUM(${col}2:${col}${sr})` });
   sRows.push(['All components', '', 'Total', tot('D'), tot('E'), { t: 'n', v: 0, f: `IF(E${sr + 1}=0,0,D${sr + 1}/E${sr + 1})`, z: '0%' }, tot('G'), tot('H'), tot('I')]);
@@ -2036,7 +2279,7 @@ function buildWorkbook() {
   last[5].v = last[4].v ? last[3].v / last[4].v : 0;
   const wsS = XLSX.utils.aoa_to_sheet(sRows);
   for (let r = 2; r <= sRows.length; r++) { const a = 'F' + r; if (wsS[a]) wsS[a].z = '0%'; }
-  wsS['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 6 }, { wch: 6 }, { wch: 14 }, { wch: 14 }];
+  wsS['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 6 }, { wch: 6 }, { wch: 14 }, { wch: 14 }, { wch: 30, hidden: true }];
   wsS['!autofilter'] = { ref: `A1:J${sRows.length - 1}` };
 
   /* --- Unit matrix (like the paper form) --- */
@@ -2065,7 +2308,7 @@ function buildWorkbook() {
       const ph = o ? o.photoIds.map(photoById).filter(Boolean) : [];
       nph += ph.length;
       if (v === '1') c1++; if (v === '1' || v === '0') c10++;
-      if (v && ph.length) row.push({ ...(v === '1' || v === '0' ? { t: 'n', v: +v } : { t: 's', v }), l: { Target: linkTarget(photoPath(ph[0])), Tooltip: ph.map(x => x.name).join(', ') } });
+      if (v && ph.length) row.push({ ...(v === '1' || v === '0' ? { t: 'n', v: +v } : { t: 's', v }), l: { Target: linkTarget(photoPath(ph[0])), Tooltip: tipList(ph.map(x => x.name)) } });
       else row.push(cellVal(v));
     }
     const rg = `${colName(firstC)}${rr}:${colName(lastC)}${rr}`;
@@ -2083,7 +2326,7 @@ function buildWorkbook() {
     totP.push({ t: 'n', v: b ? a / b : 0, f: `IF(${cl}${endU + 2}=0,0,${cl}${endU + 1}/${cl}${endU + 2})`, z: '0%' });
   });
   mRows.push(totD, totO, totP);
-  const wsM = XLSX.utils.aoa_to_sheet(mRows);
+  const wsM = XLSX.utils.aoa_to_sheet(capCells(mRows));
   wsM['!merges'] = merges;
   wsM['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 10 }, ...orderedDefs.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 14 }, { wch: 8 }];
   orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
@@ -2096,7 +2339,7 @@ function buildWorkbook() {
     pRows.push([hyperlink(ph.name, photoPath(ph)), isVideo(ph) ? 'Video' : 'Photo', origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
       ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '']);
   }
-  const wsP = XLSX.utils.aoa_to_sheet(pRows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
+  const wsP = XLSX.utils.aoa_to_sheet(capCells(pRows), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
   wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }, { wch: 14 }];
   wsP['!autofilter'] = { ref: `A1:L${Math.max(pRows.length, 2)}` };
 
@@ -2110,13 +2353,14 @@ function buildWorkbook() {
     ['Observations', 'One row per unit and condition with notes and links to every proof photo. Filter by unit, component or result.'],
     ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
     ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
+    ['Unzipping', 'Extract every export ZIP into the SAME folder, close to C:\\ (for example C:\\Inspections\\24-118). Windows "Extract All" makes a new folder per ZIP by default, which breaks links to photos from earlier exports, and deep folders can exceed Windows\' 260-character path limit.'],
     ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component.'],
     ['Unsorted folder', 'Every photo in one place, not sorted by unit: “Original names” has the photos under their original file names, “Renamed” has the same photos under their new names. The Photo Log matches each original to its renamed copy.'],
     ['Schedule', 'Units marked in the Schedule column of the Unit Matrix were on the visit schedule from the import file.'],
     ['Added on site', 'Units and conditions marked “added on site” were added in the app rather than coming from the import file.'],
     ['Results', '1 = defective, 0 = not defective, NA = condition doesn’t exist at the unit, NR = not able to be recorded.'],
   ];
-  const wsI = XLSX.utils.aoa_to_sheet(info, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' }); wsI['!cols'] = [{ wch: 20 }, { wch: 100 }];
+  const wsI = XLSX.utils.aoa_to_sheet(capCells(info), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' }); wsI['!cols'] = [{ wch: 20 }, { wch: 100 }];
 
   XLSX.utils.book_append_sheet(wb, wsM, 'Unit Matrix');
   XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
@@ -2179,6 +2423,7 @@ function openExport() {
     }
   });
 }
+const BIG_ITEM = 400 * 1048576;
 async function exportRun({ photos, copies, withXls }) {
   const p = S.project; const st = stamp(Date.now());
   const xname = `${safeName(p.number)}_Defects_${st}.xlsx`;
@@ -2192,9 +2437,12 @@ async function exportRun({ photos, copies, withXls }) {
   // split into parts by size so the phone doesn't run out of memory
   const mult = COPY_MULT[copies];
   const limit = (S.settings.partMB || 250) * 1048576;
+  const huge = photos.filter(ph => (ph.size || 0) * mult > BIG_ITEM);
+  if (huge.length && !await confirmSheet('Very large video', `${huge.length === 1 ? huge[0].name + ' is' : huge.length + ' videos are'} over ${Math.round(BIG_ITEM / 1048576)} MB in this export${mult > 1 ? ' (counting the extra copies)' : ''}. Packing ${huge.length === 1 ? 'it' : 'them'} can run the iPhone out of memory.\n\nEach one goes in its own ZIP part. If an export fails, choose Sorted only or Unsorted only to make it smaller.`, 'Continue')) return;
   const parts = []; let cur = [], curSize = 0;
   for (const ph of [...photos].sort((a, b) => a.takenAt - b.takenAt)) {
     const w = (ph.size || 0) * mult;
+    if (w > limit) { parts.push([ph]); continue; }          // bigger than a whole part: it gets a part of its own
     if (cur.length && curSize + w > limit) { parts.push(cur); cur = []; curSize = 0; }
     cur.push(ph); curSize += w;
   }
@@ -2244,11 +2492,21 @@ function shareStep(steps) {
             if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: file.name }); ok = true; }
             else { const u = URL.createObjectURL(file); const a = document.createElement('a'); a.href = u; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); ok = true; }
           } catch (e) { if (e && e.name === 'AbortError') { toast('Not saved — tap Save again'); return; } toast('Couldn’t share: ' + (e.message || e)); return; }
+          close();
           if (ok && s.photos.length) {
-            const now = Date.now();
-            for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
+            // iOS reports success even if the Files picker was cancelled, so ask. Only "Yes" marks the photos exported.
+            const yes = await new Promise(res => openSheet({
+              title: 'Did it save?', modal: true,
+              body: `<p>Check that <b>${esc(file.name)}</b> arrived where you sent it.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and will be included in your next export.</p>`,
+              foot: `<button class="btn ghost" id="ds-no">Not sure</button><button class="btn" id="ds-yes">Yes, it saved</button>`,
+              mount(e2, c2) { $('#ds-yes', e2).onclick = () => { c2(); res(true); }; $('#ds-no', e2).onclick = () => { c2(); res(false); }; }
+            }));
+            if (yes) {
+              const now = Date.now();
+              for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
+            } else toast('Not marked exported');
           }
-          close(); i++; next();
+          i++; next();
         };
       }
     });
@@ -2293,6 +2551,23 @@ $('#cam-input').addEventListener('change', onFilesChosen);
 $('#lib-input').addEventListener('change', onFilesChosen);
 $('#xls-input').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; if (f) importProjectFile(f); });
 
+const BOOT_AT = Date.now();
+// Anything that a reload would lose or interrupt.
+function appBusy() {
+  return !!(document.querySelector('.scrim, .busy, .cam') || pendingCapture || (batch && batch.photos && batch.photos.length) ||
+    (typeof CAM !== 'undefined' && (CAM.el || CAM.rec)) || document.hidden || noteTimers.size ||
+    (document.activeElement && /TEXTAREA|INPUT|SELECT/.test(document.activeElement.tagName)));
+}
+function showUpdateBanner() {
+  if (document.getElementById('upd')) return;
+  const b = document.createElement('button'); b.id = 'upd'; b.className = 'upd-banner';
+  b.innerHTML = '<b>Update ready</b> — tap to restart';
+  b.onclick = async () => {
+    if (document.querySelector('.scrim, .busy, .cam') || pendingCapture || (batch && batch.photos && batch.photos.length)) { toast('Finish what you’re doing first, then tap again'); return; }
+    await flushNotes(); location.reload();
+  };
+  document.body.appendChild(b);
+}
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').then(reg => {
@@ -2307,9 +2582,10 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (!hadController) { hadController = true; return; }
       if (reloaded) return;
-      const busyNow = document.querySelector('.scrim, .busy') || (document.activeElement && /TEXTAREA|INPUT/.test(document.activeElement.tagName));
-      if (busyNow) { toast('Update downloaded — it applies next time you open the app'); return; }
-      reloaded = true; location.reload();
+      // Reload by itself only in the first moments after the app opens, when nothing can be in progress.
+      // Any later: show "Update ready — tap to restart" and let the user choose the moment.
+      if (Date.now() - BOOT_AT < 5000 && !appBusy()) { reloaded = true; location.reload(); return; }
+      showUpdateBanner();
     });
   });
 }
@@ -2326,10 +2602,33 @@ function applyZoomLock(on = S.settings.lockZoom !== false) {
     ? 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover'
     : 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
-const outsideCamera = e => !(e.target && e.target.closest && e.target.closest('.cam'));
+// the camera and the photo viewer handle pinch themselves, so the screen zoom lock leaves them alone
+const outsideCamera = e => !(e.target && e.target.closest && e.target.closest('.cam, .viewer-wrap'));
 // iOS ignores user-scalable=no for pinch, so block the pinch gesture itself while locked
 ['gesturestart', 'gesturechange'].forEach(t => document.addEventListener(t, e => { if (zoomLocked() && outsideCamera(e)) e.preventDefault(); }, { passive: false }));
 document.addEventListener('touchmove', e => { if (zoomLocked() && e.touches && e.touches.length > 1 && outsideCamera(e)) e.preventDefault(); }, { passive: false });
 applyZoomLock(true);   // locked from the first moment; the saved choice is applied once settings load
 
-loadAll().then(() => { applyZoomLock(); render(); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
+// A second tap on a panel button within ~0.6 s is ignored (stops double-saves, double-creates, double-deletes).
+const lastTapAt = new WeakMap();
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('.sheet .btn, .sheet .mini');
+  if (!b || b.closest('.stepper')) return;
+  const t = lastTapAt.get(b), now = Date.now();
+  if (t && now - t < 600) { e.stopImmediatePropagation(); e.preventDefault(); return; }
+  lastTapAt.set(b, now);
+}, true);
+
+// Opened in a Safari tab instead of from the Home Screen: its data is kept separately, so say so.
+const isStandalone = () => navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+function showBrowserBanner() {
+  if (isStandalone() || document.getElementById('in-browser')) return;
+  const b = document.createElement('div'); b.id = 'in-browser'; b.className = 'browser-banner'; b.setAttribute('role', 'note');
+  b.textContent = 'You’re in Safari, not the Site Defects app — data here is separate.';
+  document.body.prepend(b); document.documentElement.classList.add('in-browser');
+  const fit = () => document.documentElement.style.setProperty('--bb-h', b.offsetHeight + 'px');
+  fit(); addEventListener('resize', fit);
+}
+showBrowserBanner();
+
+loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });

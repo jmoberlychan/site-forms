@@ -39,30 +39,39 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
      - **Zoom:** iOS doesn't tell web apps the telephoto's magnification, so it's set under the chevron (**Telephoto lens: 2×–5×**). The app guesses from the screen size: 5× on 16 Pro sizes, 3× otherwise. Zoom between lenses in photos is digital (a crop), like the iPhone's 2×. In video, zoom moves straight to the nearest lens.
      - **Turning the phone:** like the iPhone Camera, the screen layout stays put while the controls turn to face you. The recording timer and the options chevron stay still. Photos and videos taken sideways come out landscape. The first time, iOS asks to allow **Motion & Orientation** access; allow it so the app knows which way the phone is held. This works with Portrait Orientation Lock on or off.
      - **Video shape:** video is taller than photos (16:9 versus 4:3), so in Video the picture runs the full width of the screen behind the controls, as it does in the iPhone Camera.
-     - **Quality:** photos are frames from the camera feed (about 8 MP). They are not Live Photos. Videos are recorded at 1080p or 4K (set in Settings) and stop automatically at 5 minutes.
+     - **Quality:** photos are frames from the camera feed (about 8 MP). They are not Live Photos. Videos are recorded at 1080p or 4K (set in Settings) and stop automatically at 5 minutes or about 300 MB, whichever comes first. While recording, the timer shows how much time is left.
 8. **Notes:** each condition has a **Note** field. Each unit and component also has its own General notes box.
 9. **Export:** choose what to export (spreadsheet + photos, photos only, or spreadsheet only), which copies (sorted, unsorted, or both), and which photos (not yet exported, or all). **Sorted** puts renamed photos in `Photos/<Unit>/<Component>/`. **Unsorted** puts every photo in one `Unsorted/` folder with two sub-folders: `Original names/` and `Renamed/`. Unzip the ZIP and keep the spreadsheet next to the Photos folder; then the photo links open from Excel.
+   - **Unzipping on Windows:** extract every ZIP (all parts) into the **same** folder, close to `C:\` — for example `C:\Inspections\24-118`. Parts are designed to merge into one folder tree, and a short path keeps Windows under its 260-character path limit.
+   - **Did it save?** After each Save / share, the app asks whether the file arrived. Only **Yes** marks those photos as exported. If you tap **Not sure**, they stay unexported and go into the next export.
+   - A single video bigger than the ZIP part size goes into a ZIP part of its own. The app warns before packing anything over about 400 MB.
 
 ## Screen zoom
 
-**Settings → Lock screen zoom** is on by default. Pinch and double-tap don't zoom the screen in or out, so the screen can't be zoomed by accident. Turn it off if you need to zoom the screen; it takes effect straight away and is remembered after you tap **Save**. The built-in camera's own pinch-to-zoom works either way.
+**Settings → Lock screen zoom** is on by default. Pinch and double-tap don't zoom the screen in or out, so the screen can't be zoomed by accident. Turn it off if you need to zoom the screen; it takes effect straight away and is remembered after you tap **Save**. The built-in camera's own pinch-to-zoom works either way. So does the photo viewer: pinch or double-tap a photo to zoom into it, and drag to look around.
+
+## Opening it from the Home Screen
+
+Always open the app from its Home Screen icon. If it's opened in a Safari tab instead, a yellow banner says so: Safari keeps a separate copy of the app's data, so projects and photos from the Home Screen app don't appear there.
 
 ## Photo names
 
 `<Project#>_<Initials>_<YYYYMMDD>_<####>.jpg`, for example `24-118_JM_20261028_0042.jpg`.
 
-The number restarts at 0001 each day for each inspector. The date is included so names never repeat across days. Deleted photo numbers are not reused.
+The number restarts at 0001 each day for each inspector. The date is included so names never repeat across days. Deleted photo numbers are not reused, even if the project is deleted and imported again under the same project number.
 
 ## The spreadsheet
 
 - **Unit Matrix:** units down the side and conditions across the top, the same layout as the paper form. Each 1/0 cell links to its proof photo. Totals and % defective are in the bottom rows and right-hand columns.
-- **Summary:** for each condition, Defective (1), Observed (1+0), % defective, NA, NR and not-yet-recorded. These are live formulas.
+- **Summary:** for each condition, Defective (1), Observed (1+0), % defective, NA, NR and not-yet-recorded. These are live formulas. They count by each condition's ID (in the hidden Condition ID column), so names with symbols such as `>` or `*`, or two conditions with the same name, are counted correctly.
 - **Observations:** one row per unit and condition, with notes and a link to every proof photo. It is filterable.
 - **Photo Log:** every photo, with its unit, component and the conditions it proves.
 
 ## Updating the defect list mid-project
 
-Edit the Excel file and import it again with the same project number. Results and photos are kept wherever the unit name and defect text still match.
+Edit the Excel file and import it again with the same project number. The app matches each condition to the new file by its code within the same component first, then by its name. A matched condition keeps its results, notes and photos even if its name was corrected.
+
+Units, components and conditions that are no longer in the file are kept if they have results, notes or photos. They are tagged **No longer in the import file**, and you can delete them in **Menu → Edit lists**. Ones with no data are dropped.
 
 ## Storage
 
@@ -79,7 +88,7 @@ Edit the Excel file and import it again with the same project number. Results an
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed.
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed.
 
 To go back to a version, upload **all 10 files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 
@@ -87,4 +96,4 @@ To go back to a version, upload **all 10 files** from that version's folder to G
 
 When the app code changes, upload **all** the changed files together, at the top level of the repository (not inside a folder). Each version has a matching number in three places: `APP_VERSION` in `app.js`, `VERSION` in `sw.js`, and `app-version` in `index.html`.
 
-From version 1.3.2 on, a phone with a connection picks up a new version automatically: open the app once, and it reloads itself into the new version. If the files on GitHub don't match each other (for example, one was missed in an upload), **Menu** shows a warning next to the version number. Phones pick up the update the next time the app is opened with a connection.
+From version 1.3.2 on, a phone with a connection picks up a new version automatically. From 1.7.0, the app only reloads by itself in the first few seconds after opening. If an update arrives later, while you're working, a blue **Update ready — tap to restart** bar appears instead, so a camera, a note or an export is never interrupted. If the files on GitHub don't match each other (for example, one was missed in an upload), **Menu** shows a warning next to the version number. Phones pick up the update the next time the app is opened with a connection.
