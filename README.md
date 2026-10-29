@@ -110,6 +110,7 @@ Units, components and conditions that are no longer in the file are kept if they
 - Photos are kept inside the app's private storage on the iPhone. They are not in the Photos app or iCloud Drive, and nothing is deleted automatically when a project ends.
 - iOS decides how much space the app may use. It's a share of the phone's free space, so freeing space on the phone raises the limit. **Settings & storage** shows how much is used.
 - Space is cleared automatically once the PC has confirmed it has the photos (see above).
+- A removed photo keeps its thumbnail and its links. Unlinking or deleting one asks you to confirm first, so the wrong photo isn't unlinked by mistake. Removed photos can't be moved to another unit, because their exported copy is already in that unit's folder.
 - **Settings & storage → Free up space** still works as before: it removes every exported full-size photo, whether or not the PC has confirmed it. Thumbnails, results and links stay.
 - When a project is finished and everything is exported and saved, delete it from **Menu → Projects**.
 
@@ -121,7 +122,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
 
 To go back to a version, upload **all 10 files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 

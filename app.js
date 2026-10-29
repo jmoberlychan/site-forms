@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.7.4';
+const APP_VERSION = '1.7.5';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -2000,11 +2000,20 @@ async function viewPhoto(id) {
       el.addEventListener('click', async e => {
         const b = e.target.closest('[data-unlink],[data-link],[data-link1]');
         if (b) {
-          if (b.dataset.unlink) await unlinkPhoto(p, b.dataset.unlink);
+          if (b.dataset.unlink) {
+            // a removed photo is only a thumbnail here: make unlinking it a deliberate, second step
+            if (p.removed) {
+              const df = defectById(b.dataset.unlink);
+              if (!await confirmSheet('Unlink a removed photo?', `${p.name} was exported and removed from this phone, so only its thumbnail is left.\n\nIf you unlink it, it no longer proves “${df ? df.label : b.dataset.unlink}”, and the next spreadsheet export won’t link to it. The exported file on the PC isn’t affected, and you can link it again from this photo.\n\nCheck that this is the right photo.`, 'Unlink', true)) return;
+            }
+            await unlinkPhoto(p, b.dataset.unlink);
+          }
           else await linkPhoto(p, b.dataset.link || b.dataset.link1, b.dataset.link1 ? '1' : null);
           draw(el); zoomable($('.viewer-img.zoomable', el)); render(); return;
         }
-        if (e.target.id === 'v-del' && await confirmSheet('Delete photo?', `Delete ${p.name} from this phone? Its number won’t be reused.`, 'Delete', true)) {
+        if (e.target.id === 'v-del' && await confirmSheet('Delete photo?', p.removed
+            ? `${p.name} was already exported and removed from this phone; only its thumbnail is left. Deleting it also removes the thumbnail and its links, so the next spreadsheet export won’t list it. The exported file on the PC isn’t affected. Its number won’t be reused.`
+            : `Delete ${p.name} from this phone? Its number won’t be reused.`, 'Delete', true)) {
           await deletePhoto(p); close(); render(); toast('Photo deleted');
         }
       });
