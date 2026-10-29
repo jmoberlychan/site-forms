@@ -1,7 +1,7 @@
 // Site Defects service worker.
 // Online: always fetches the newest app files from the server (so updates arrive on the next open).
 // Offline or very weak signal: serves the copy saved on the phone.
-const VERSION = 'site-defects-v1.7.2';
+const VERSION = 'site-defects-v1.7.3';
 const FILES = [
   './',
   'index.html',

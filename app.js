@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.7.2';
+const APP_VERSION = '1.7.3';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -2639,8 +2639,10 @@ async function exportRun({ photos, copies, withXls }) {
   if (cur.length) parts.push(cur);
   const root = `${safeName(p.number)} Inspection`;
   const kind = withXls ? 'Export' : (copies === 'o' ? 'Unsorted' : copies === 'b' ? 'Photos' : 'Sorted');
+  const t0 = Date.now(), hhmm = pad(new Date(t0).getHours(), 2) + pad(new Date(t0).getMinutes(), 2);
   const jobs = parts.map((ph, i) => ({ photos: ph, idx: i, total: parts.length,
-    name: `${safeName(p.number)}_${kind}_${st}${parts.length > 1 ? `_part${i + 1}of${parts.length}` : ''}.zip` }));
+    // 267180.00 2026-10-29 JJM Export 1215 part 1 of 3.zip
+    name: `${safeName(p.number)} ${isoDay(t0)} ${safeName(S.settings.initials || 'XX')} ${kind} ${hhmm}${parts.length > 1 ? ` part ${i + 1} of ${parts.length}` : ''}.zip` }));
   const xcrc = xblob ? await crcOfBlob(xblob) : 0, now = Date.now();
   shareStep(jobs.map(j => ({ lazy: async () => {
     const pre = j.total > 1 ? `part ${j.idx + 1} of ${j.total} · ` : '';
@@ -2668,6 +2670,9 @@ async function exportRun({ photos, copies, withXls }) {
 // Big files can't go through the iOS share sheet (it loads the whole file into memory and the app crashes),
 // so Download (saved to Files › Downloads, streamed from storage) is the main way out.
 let SHARE_MAX = 400 * 1048576;
+// In a Home Screen app, iOS shows a preview for downloads instead of saving to Downloads (Apple: by design, WebKit bug 275288).
+// The preview's share button then saves the file from storage, so it works at any size.
+const SHARE_ICON = '<svg class="ico-share" viewBox="0 0 24 24" aria-label="share button" role="img"><path d="M12 3v12M7.5 7.5 12 3l4.5 4.5M6 11H5v10h14V11h-1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 function shareStep(steps) {
   let i = 0;
   const next = async () => {
@@ -2683,7 +2688,7 @@ function shareStep(steps) {
         const yes = await new Promise(res => openSheet({
           title: 'Did it save?', modal: true,
           body: how === 'dl'
-            ? `<p>Open the <b>Files</b> app → <b>Downloads</b> and check that <b>${esc(file.name)}</b> is there and is about <b>${mb(file.size)}</b>. A big file can take a minute to finish.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and go into your next export.</p>`
+            ? `<p>Did you save <b>${esc(file.name)}</b> (${mb(file.size)}) to Files or OneDrive from the preview?</p><p class="note">If you closed the preview without saving, tap <b>Not sure</b>. Photos are only marked exported if you tap Yes; otherwise they stay unexported and go into your next export.</p>`
             : `<p>Check that <b>${esc(file.name)}</b> arrived where you sent it.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and go into your next export.</p>`,
           foot: `<button class="btn ghost" id="ds-no">Not sure</button><button class="btn" id="ds-yes">Yes, it saved</button>`,
           mount(e2, c2) { $('#ds-yes', e2).onclick = () => { c2(); res(true); }; $('#ds-no', e2).onclick = () => { c2(); res(false); }; }
@@ -2699,8 +2704,13 @@ function shareStep(steps) {
     openSheet({
       title: steps.length > 1 ? `Ready: ${s.label}` : 'Export ready',
       body: `<p class="fname">${esc(file.name)}</p><p class="note">${mb(file.size)}${s.photos.length ? ` · ${s.photos.length} photos` : ''}</p>
-        <p class="note"><b>Download</b> saves it to <b>Files → Downloads</b> on this iPhone, at any size. Move it to OneDrive or your PC from there.</p>
-        <p class="note">${big ? `<b>Share</b> is off for files over ${mb(SHARE_MAX)}: the iPhone share sheet can’t handle them and the app closes.` : '<b>Share</b> opens the iPhone share sheet (Save to Files, OneDrive, AirDrop, Mail).'}</p>`,
+        <ol class="steps">
+          <li>Tap <b>Download</b>. The iPhone shows a preview of the ZIP.</li>
+          <li>Tap the <b>share button</b> ${SHARE_ICON} at the bottom left of the preview.</li>
+          <li>Choose <b>Save to Files</b> (or <b>OneDrive</b>) and pick the folder.</li>
+          <li>When it’s saved, tap <b>✕</b> at the top left to come back here.</li>
+        </ol>
+        <p class="note">Works at any size. ${big ? `<b>Share…</b> is off for files over ${mb(SHARE_MAX)}: the share sheet loads the whole file into memory and the app closes.` : '<b>Share…</b> opens the share sheet directly (small files only).'}</p>`,
       foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn ghost" id="sh" ${big ? 'disabled' : ''}>Share…</button><button class="btn" id="sv">Download</button>`,
       onClose() { if (url) { URL.revokeObjectURL(url); url = null; } },
       mount(el, close) {
