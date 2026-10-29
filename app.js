@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -566,17 +566,38 @@ function pickRecMime() {
   return '';
 }
 const lensById = id => CAM.lenses.find(l => l.id === id);
-function lensBase() { const l = lensById(CAM.lensId); return l && l.factor ? l.factor : 1; }
-function digitalAllowed() { return CAM.mode === 'photo'; } // a crop can't be applied to a recording, so video zoom uses lenses / native zoom only
+// The telephoto's magnification isn't exposed to web apps, so it's a setting (guessed from the screen size, adjustable in the camera options).
+function teleFactor() {
+  if (S.settings.teleF) return S.settings.teleF;
+  const w = Math.min(screen.width, screen.height);
+  return w === 402 || w === 440 ? 5 : 3;           // 16 Pro / Pro Max sizes → 5×; most earlier Pros → 3×
+}
+function lensFactor(l) { return !l ? 1 : l.kind === 'ultra' ? 0.5 : l.kind === 'tele' ? teleFactor() : 1; }
+function lensBase() { return lensFactor(lensById(CAM.lensId)); }
+function lensOfKind(k) { return CAM.lenses.find(l => l.kind === k); }
+function digitalAllowed() { return CAM.mode === 'photo'; } // a crop can't be applied to a recording, so video zoom moves between lenses only
+// Overall zoom range across all lenses (0.5 with an ultra-wide; up to 10× digital in photo mode).
 function zoomLimits() {
-  const base = lensBase();
-  const ultra = CAM.lenses.find(l => l.factor === 0.5);
-  const onWide = lensById(CAM.lensId) && lensById(CAM.lensId).factor === 1;
-  const min = onWide && ultra ? 0.5 : base;           // pinching below 1× hops to the 0.5 lens
-  let max = base;
-  if (CAM.native) max = base * CAM.native.max;
-  else if (digitalAllowed()) max = base * 10;
+  const ultra = lensOfKind('ultra'), tele = lensOfKind('tele');
+  const min = ultra ? 0.5 : lensBase();
+  let max;
+  if (CAM.native) max = lensBase() * CAM.native.max;
+  else if (digitalAllowed()) max = Math.max(10, tele ? teleFactor() * 2 : 0);
+  else max = tele ? teleFactor() : (CAM.lenses.length ? 1 : lensBase());
   return { min, max: Math.max(min, max) };
+}
+// Which lens a zoom level belongs on — the same switch points the iPhone uses.
+function lensFor(z) {
+  const ultra = lensOfKind('ultra'), wide = lensOfKind('wide'), tele = lensOfKind('tele');
+  if (!wide) return CAM.lensId;
+  if (!digitalAllowed() && !CAM.native) {            // video: no digital zoom, so go to the nearest lens
+    if (ultra && z < Math.SQRT1_2) return ultra.id;
+    if (tele && z >= Math.sqrt(teleFactor())) return tele.id;
+    return wide.id;
+  }
+  if (ultra && z < 0.995) return ultra.id;
+  if (tele && z >= teleFactor() - 0.005) return tele.id;
+  return wide.id;
 }
 function fmtZoom(z) { const r = Math.round(z * 10) / 10; return (r < 1 ? String(r).replace(/^0/, '') : String(r).replace(/\.0$/, '')) + '×'; }
 
@@ -596,12 +617,14 @@ function openCamera() {
     </div>
     <div class="cam-opts" hidden>
       ${stepperHTML()}
+      <label class="cam-tele" hidden>Telephoto lens <select data-cam-tele>${[2, 2.5, 3, 4, 5].map(f => `<option value="${f}">${f}×</option>`).join('')}</select></label>
       <div class="cam-opts-row"><button class="cam-link" data-cam="restart">Restart camera</button><button class="cam-link" data-cam="native">Use iPhone camera</button></div>
       <div class="cam-diag"></div>
     </div>
     <div class="cam-stage">
       <div class="cam-vf">
         <video class="cam-view" playsinline autoplay muted></video>
+        <canvas class="cam-freeze" hidden></canvas>
         <div class="cam-blink"></div>
         <div class="cam-ctx"></div>
         <div class="cam-lock" hidden>AE/AF LOCK</div>
@@ -630,18 +653,27 @@ function openCamera() {
   el.addEventListener('click', onCamClick);
   bindViewfinderGestures($('.cam-vf', el));
   bindZoomRowDrag($('.cam-zoomrow', el));
+  bindWheelDrag($('.cam-dial', el), { onlyWhenOpen: true });
+  $('[data-cam-tele]', el).addEventListener('change', async e => { S.settings.teleF = +e.target.value; await saveSettings(); setZoom(CAM.zoom); camUpdate(); });
   document.addEventListener('batchchange', camUpdate);
   document.addEventListener('visibilitychange', camVisibility);
   if (window.ResizeObserver) { CAM.ro = new ResizeObserver(() => { fitViewfinder(); centerModes(); }); CAM.ro.observe($('.cam-stage', el)); }
   camUpdate(); requestAnimationFrame(centerModes); startStream();
 }
+function showFreeze() {
+  const v = $('.cam-view', CAM.el), c = $('.cam-freeze', CAM.el); if (!v.videoWidth) return;
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  try { c.getContext('2d').drawImage(v, 0, 0); c.style.transform = v.style.transform; c.hidden = false; } catch (_) {}
+}
+function hideFreeze() { const c = CAM.el && $('.cam-freeze', CAM.el); if (c) c.hidden = true; }
 function camLog(s) { CAM.log.push(s); if (CAM.log.length > 12) CAM.log.shift(); if (CAM.el && CAM.optsOpen) renderDiag(); }
 function renderDiag() {
   const d = CAM.el && $('.cam-diag', CAM.el); if (!d) return;
   const c = CAM.caps || {};
   d.innerHTML = `<b>Camera details</b><br>${esc(CAM.label || 'not started')}${CAM.res ? ' · ' + esc(CAM.res) : ''}<br>
     Flash: ${c.torch ? 'available' : 'not offered by iOS on this lens'} · Optical zoom control: ${CAM.native ? 'yes' : 'no (lens buttons + digital)'}<br>
-    Lenses found: ${CAM.lenses.length ? esc(CAM.lenses.map(l => l.label).join(', ')) : 'one'}${CAM.err ? `<br><span class="cam-err">Last error: ${esc(CAM.err)}</span>` : ''}
+    Lenses used: ${CAM.lenses.length ? esc(CAM.lenses.map(l => l.kind === 'ultra' ? '.5×' : l.kind === 'tele' ? teleFactor() + '× tele' : '1×').join(', ')) : 'one'}<br>
+    iOS cameras: ${esc((CAM.allCams || []).join(', ') || '—')}${CAM.err ? `<br><span class="cam-err">Last error: ${esc(CAM.err)}</span>` : ''}
     <br><span class="cam-log">${esc(CAM.log.join(' › '))}</span>`;
 }
 const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error(what + ' timed out'), { name: 'TimeoutError' })), ms))]);
@@ -652,6 +684,7 @@ async function startStream() {
   CAM.starting = true; CAM.err = '';
   const v = $('.cam-view', CAM.el);
   const hadStream = !!CAM.stream;
+  if (hadStream) showFreeze();
   stopTracks(); v.pause(); v.srcObject = null;
   if (hadStream) await new Promise(r => setTimeout(r, 250));   // let iOS release the previous lens before asking again
   if (!CAM.el) { CAM.starting = false; return; }
@@ -706,8 +739,9 @@ async function startStream() {
   readCaps();
   if (CAM.torch) setTorch(true, true);
   const { min, max } = zoomLimits();
-  CAM.zoom = Math.min(max, Math.max(min, CAM.zoom < lensBase() ? lensBase() : CAM.zoom));
-  applyZoom(); fitViewfinder(); camUpdate();
+  CAM.zoom = Math.min(max, Math.max(min, CAM.zoom || 1));
+  if (!digitalAllowed() && !CAM.native) CAM.zoom = lensBase();   // video shows exactly the lens in use
+  applyZoom(); fitViewfinder(); camUpdate(); hideFreeze();
   if (CAM.again) { CAM.again = false; startStream(); }
 }
 async function findLenses() {
@@ -715,9 +749,10 @@ async function findLenses() {
     if (!CAM.lenses.length) {
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
       camLog(devs.length + ' cameras');
-      const pick = (re, factor, label) => { const d = devs.find(x => re.test(x.label)); return d ? { id: d.deviceId, factor, label, name: d.label } : null; };
-      const L = [pick(/back.*ultra ?wide/i, 0.5, '.5'), pick(/^back camera$/i, 1, '1'), pick(/back.*telephoto/i, null, 'Tele')].filter(Boolean);
-      CAM.lenses = L.some(l => l.factor === 1) ? L : [];
+      CAM.allCams = devs.map(d => d.label || '(unnamed)');
+      const pick = (re, kind) => { const d = devs.find(x => re.test(x.label)); return d ? { id: d.deviceId, kind, name: d.label } : null; };
+      const L = [pick(/back.*ultra ?wide/i, 'ultra'), pick(/^back camera$/i, 'wide'), pick(/back.*telephoto/i, 'tele')].filter(Boolean);
+      CAM.lenses = L.some(l => l.kind === 'wide') ? L : [];
     }
     // Work out which lens is actually open (by id, then by name). Never force a restart just to find out.
     const st = CAM.track && CAM.track.getSettings ? CAM.track.getSettings() : {};
@@ -751,36 +786,39 @@ function centerModes() {
 }
 
 /* ---------- zoom wheel (like the iPhone's dial) ---------- */
-const DIAL = { degPerOctave: 34, R: 0 };
+const DIAL = { degPerOctave: 24, R: 0, H: 92 };
 function zAngle(z) { return Math.log2(z) * DIAL.degPerOctave; }
 function drawDial() {
   const dial = $('.cam-dial', CAM.el), svg = $('.cam-dial-svg', CAM.el), vf = $('.cam-vf', CAM.el);
-  const W = vf.clientWidth || 360, H = 120, R = Math.max(260, W * 0.95), cx = W / 2, cy = 26 + R;
+  const W = vf.clientWidth || 360, H = DIAL.H, R = Math.max(300, W * 1.15), cx = W / 2, cy = 34 + R;
   DIAL.R = R;
   const { min, max } = zoomLimits();
   const ticks = [];
   const add = (from, to, step) => { for (let z = from; z <= to + 1e-9; z = Math.round((z + step) * 1000) / 1000) if (z >= min - 1e-9 && z <= max + 1e-9) ticks.push(z); };
-  add(0.5, 1, 0.05); add(1.1, 2, 0.1); add(2.2, 5, 0.2); add(5.5, 10, 0.5); add(11, 15, 1);
-  const majors = [0.5, 1, 2, 3, 5, 10, 15].filter(z => z >= min - 1e-9 && z <= max + 1e-9);
+  add(0.5, 1, 0.1); add(1.1, 2, 0.1); add(2.25, 5, 0.25); add(5.5, 10, 0.5); add(11, 25, 1);
+  const tf = lensOfKind('tele') ? teleFactor() : null;
+  const majors = [...new Set([0.5, 1, 2, tf, 5, 10].filter(z => z && z >= min - 1e-9 && z <= max + 1e-9))];
+  if (tf && !ticks.some(z => Math.abs(z - tf) < 1e-6)) ticks.push(tf);
   const pt = (deg, r) => { const a = deg * Math.PI / 180; return [cx + r * Math.sin(a), cy - r * Math.cos(a)]; };
   let g = '';
   for (const z of ticks) {
     const major = majors.some(m => Math.abs(m - z) < 1e-6);
-    const [x1, y1] = pt(zAngle(z), R), [x2, y2] = pt(zAngle(z), R - (major ? 14 : 8));
+    const [x1, y1] = pt(zAngle(z), R), [x2, y2] = pt(zAngle(z), R - (major ? 10 : 6));
     g += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" class="${major ? 'mj' : 'mn'}"/>`;
   }
   for (const z of majors) {
-    const [x, y] = pt(zAngle(z), R - 30);
-    g += `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" transform="rotate(${zAngle(z).toFixed(2)} ${x.toFixed(1)} ${y.toFixed(1)})">${z < 1 ? '.5' : z + '×'}</text>`;
+    const [x, y] = pt(zAngle(z), R - 21);
+    g += `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" transform="rotate(${zAngle(z).toFixed(2)} ${x.toFixed(1)} ${y.toFixed(1)})">${z < 1 ? '.5' : (Math.round(z * 10) / 10) + '×'}</text>`;
   }
+  // value on top, then the pointer, then the ticks: nothing overlaps
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
-  svg.innerHTML = `<g class="cam-dial-g" style="transform-origin:${cx}px ${cy}px">${g}</g><path d="M${cx - 6} 6 L${cx + 6} 6 L${cx} 15 Z" class="ptr"/>`;
-  dial.dataset.key = `${W}|${min}|${max}`;
+  svg.innerHTML = `<text class="val" x="${cx}" y="11"></text><path d="M${cx - 5} 21 L${cx + 5} 21 L${cx} 29 Z" class="ptr"/><g class="cam-dial-g" style="transform-origin:${cx}px ${cy}px">${g}</g>`;
+  dial.dataset.key = `${W}|${min}|${max}|${tf}`;
 }
 function showDial() {
   if (!CAM.el) return;
   const { min, max } = zoomLimits(); if (max - min < 0.05) return;
-  const dial = $('.cam-dial', CAM.el), key = `${$('.cam-vf', CAM.el).clientWidth}|${min}|${max}`;
+  const dial = $('.cam-dial', CAM.el), key = `${$('.cam-vf', CAM.el).clientWidth}|${min}|${max}|${lensOfKind('tele') ? teleFactor() : null}`;
   if (dial.dataset.key !== key) drawDial();
   clearTimeout(DIAL.hideT); dial.hidden = false; dial.classList.add('on'); CAM.el.classList.add('dialing');
   updateDial();
@@ -788,11 +826,11 @@ function showDial() {
 function updateDial() {
   const dial = CAM.el && $('.cam-dial', CAM.el); if (!dial || dial.hidden) return;
   const g = dial.querySelector('.cam-dial-g'); if (g) g.style.transform = `rotate(${-zAngle(CAM.zoom)}deg)`;
-  $('.cam-dial-val', CAM.el).textContent = fmtZoom(CAM.zoom);
+  const t = dial.querySelector('text.val'); if (t) t.textContent = fmtZoom(CAM.zoom);
 }
 function hideDialSoon() {
   clearTimeout(DIAL.hideT);
-  DIAL.hideT = setTimeout(() => { if (!CAM.el) return; const d = $('.cam-dial', CAM.el); d.classList.remove('on'); CAM.el.classList.remove('dialing'); setTimeout(() => { if (!d.classList.contains('on')) d.hidden = true; }, 200); }, 1100);
+  DIAL.hideT = setTimeout(() => { if (!CAM.el) return; const d = $('.cam-dial', CAM.el); d.classList.remove('on'); CAM.el.classList.remove('dialing'); setTimeout(() => { if (!d.classList.contains('on')) d.hidden = true; }, 200); }, 1800);
 }
 
 /* ---------- zoom ---------- */
@@ -803,8 +841,7 @@ function applyZoom() {
   const v = $('.cam-view', CAM.el);
   if (CAM.native) {
     v.style.transform = '';
-    const nz = Math.min(CAM.native.max, Math.max(CAM.native.min, rel));
-    CAM.track.applyConstraints({ advanced: [{ zoom: nz }] }).catch(() => {});
+    CAM.track && CAM.track.applyConstraints({ advanced: [{ zoom: Math.min(CAM.native.max, Math.max(CAM.native.min, rel)) }] }).catch(() => {});
   } else {
     v.style.transform = digitalAllowed() && rel > 1.001 ? `scale(${rel})` : '';
   }
@@ -812,72 +849,73 @@ function applyZoom() {
 }
 function digitalFactor() { return !CAM.native && digitalAllowed() ? Math.max(1, CAM.zoom / lensBase()) : 1; }
 function zoomPresets() {
+  const ultra = lensOfKind('ultra'), tele = lensOfKind('tele');
   const P = [];
-  const ultra = CAM.lenses.find(l => l.factor === 0.5), wide = CAM.lenses.find(l => l.factor === 1), tele = CAM.lenses.find(l => !l.factor);
-  if (ultra) P.push({ z: 0.5, lens: ultra.id, label: '.5' });
-  P.push({ z: 1, lens: wide ? wide.id : null, label: '1' });
-  if (CAM.native || digitalAllowed()) P.push({ z: 2, lens: wide ? wide.id : null, label: '2' });
-  if (tele) P.push({ z: null, lens: tele.id, label: 'Tele' });
+  if (ultra) P.push({ z: 0.5, label: '.5' });
+  P.push({ z: 1, label: '1' });
+  if (CAM.native || digitalAllowed()) { if (!tele || teleFactor() > 2) P.push({ z: 2, label: '2' }); }
+  if (tele) P.push({ z: teleFactor(), label: String(teleFactor()) });
   return P;
 }
 function renderZoomRow() {
-  const row = $('.cam-zoomrow', CAM.el); if (!row) return;
-  const P = zoomPresets(); const onTele = lensById(CAM.lensId) && !lensById(CAM.lensId).factor;
-  // which preset is "active": the highest preset at or below the current zoom on the current lens
-  let active = -1;
-  P.forEach((p, i) => {
-    if (onTele) { if (p.z === null) active = i; return; }
-    if (p.z !== null && (!p.lens || p.lens === CAM.lensId || (p.z >= 1 && lensBase() === 1)) && CAM.zoom >= p.z - 0.001) active = i;
-  });
-  const curLabel = onTele ? (CAM.zoom / lensBase() > 1.05 ? 'T ' + fmtZoom(CAM.zoom / lensBase()) : 'Tele') : fmtZoom(CAM.zoom);
-  row.innerHTML = P.map((p, i) => `<button data-cam="zoom" data-i="${i}" class="${i === active ? 'on' : ''}" aria-pressed="${i === active}" ${CAM.rec && p.lens && p.lens !== CAM.lensId ? 'disabled' : ''}>${i === active ? curLabel : p.label}</button>`).join('');
+  const row = CAM.el && $('.cam-zoomrow', CAM.el); if (!row) return;
+  const P = zoomPresets();
+  let active = 0; P.forEach((p, i) => { if (CAM.zoom >= p.z - 0.001) active = i; });
+  row.innerHTML = P.map((p, i) => `<button data-cam="zoom" data-i="${i}" class="${i === active ? 'on' : ''}" aria-pressed="${i === active}" ${CAM.rec && lensFor(p.z) !== CAM.lensId ? 'disabled' : ''}>${i === active ? fmtZoom(CAM.zoom) : p.label}</button>`).join('');
   row.hidden = P.length < 2;
 }
-async function zoomTo(z, lensId) {
-  if (lensId && lensId !== CAM.lensId) {
-    if (CAM.rec) return;
-    CAM.lensId = lensId; CAM.zoom = z == null ? lensBase() : z;
-    if (z == null) CAM.zoom = 1; // placeholder until the tele lens opens
-    await startStream();
-    if (z == null) { CAM.zoom = lensBase(); applyZoom(); }
-    return;
-  }
+// Move to a zoom level; changes lens automatically when the level belongs on another lens.
+// During a gesture the lens change waits until the finger pauses, so the picture doesn't keep restarting.
+function setZoom(z, { gesture = false } = {}) {
   const { min, max } = zoomLimits();
-  CAM.zoom = Math.min(max, Math.max(lensBase(), Math.min(max, Math.max(min, z))));
+  CAM.zoom = Math.min(max, Math.max(min, z));
   applyZoom();
+  const want = lensFor(CAM.zoom);
+  clearTimeout(CAM.lensT);
+  if (want && want !== CAM.lensId && !CAM.rec) {
+    if (gesture) CAM.lensT = setTimeout(() => switchLens(want), 220);
+    else switchLens(want);
+  }
 }
-// Called when a pinch/drag ends: hop between 0.5 and 1 lenses like the iPhone does.
-function settleZoom() {
-  const ultra = CAM.lenses.find(l => l.factor === 0.5), wide = CAM.lenses.find(l => l.factor === 1);
-  if (CAM.rec) return;
-  if (ultra && wide && CAM.lensId === wide.id && CAM._pinchWant < 0.95) { zoomTo(0.5, ultra.id); return; }
-  if (ultra && wide && CAM.lensId === ultra.id && CAM.zoom >= 1) { zoomTo(CAM.zoom, wide.id); return; }
+async function switchLens(id) {
+  if (!CAM.el || CAM.rec || id === CAM.lensId) return;
+  CAM.lensId = id;
+  await startStream();
+  // a gesture may have kept going while the lens opened
+  const want = lensFor(CAM.zoom); if (want !== CAM.lensId && !CAM.starting) switchLens(want);
 }
-function setPinchZoom(z) {
-  CAM._pinchWant = z;
-  const { max } = zoomLimits();
-  const lo = lensBase();
-  CAM.zoom = Math.min(max, Math.max(lo, z));
-  applyZoom(); showDial();
+function endZoomGesture() {
+  clearTimeout(CAM.lensT);
+  if (!digitalAllowed() && !CAM.native) {            // video: snap to the lens the zoom landed on
+    const w = lensFor(CAM.zoom), l = lensById(w);
+    CAM.zoom = lensFactor(l);
+  }
+  setZoom(CAM.zoom); hideDialSoon();
 }
-function bindZoomRowDrag(row) {
-  let sx = null, z0 = 1, moved = false;
-  row.addEventListener('pointerdown', e => { sx = e.clientX; z0 = CAM.zoom; moved = false; row._pid = e.pointerId; });
-  row.addEventListener('pointermove', e => {
+function setPinchZoom(z) { setZoom(z, { gesture: true }); showDial(); }
+// Turning the wheel: drag left to zoom in. Works on the zoom buttons and anywhere on the wheel itself.
+function bindWheelDrag(el, opts = {}) {
+  let sx = null, z0 = 1, moved = false, pid = null;
+  el.addEventListener('pointerdown', e => {
+    if (opts.onlyWhenOpen && !CAM.el.classList.contains('dialing')) return;
+    e.stopPropagation(); sx = e.clientX; z0 = CAM.zoom; moved = !!opts.onlyWhenOpen; pid = e.pointerId;
+    if (moved) { try { el.setPointerCapture(pid); } catch (_) {} showDial(); }
+  });
+  el.addEventListener('pointermove', e => {
     if (sx == null) return;
-    const dx = e.clientX - sx; if (Math.abs(dx) < 8 && !moved) return;
-    if (!moved) { try { row.setPointerCapture(row._pid); } catch (_) {} showDial(); }
-    moved = true; row.classList.add('dragging');
-    // turning the wheel: drag left to zoom in; one "octave" (×2) per arc of the wheel's tick spacing
-    const pxPerOctave = Math.max(90, (DIAL.R || 330) * DIAL.degPerOctave * Math.PI / 180);
+    const dx = e.clientX - sx; if (Math.abs(dx) < 6 && !moved) return;
+    if (!moved) { try { el.setPointerCapture(pid); } catch (_) {} showDial(); }
+    moved = true; e.stopPropagation();
+    const pxPerOctave = Math.max(70, (DIAL.R || 400) * DIAL.degPerOctave * Math.PI / 180);
     setPinchZoom(z0 * Math.pow(2, -dx / pxPerOctave));
   });
   const end = e => {
-    if (sx == null) return; sx = null; row.classList.remove('dragging');
-    if (moved) { e.preventDefault(); row._suppressClick = true; settleZoom(); hideDialSoon(); setTimeout(() => row._suppressClick = false, 50); }
+    if (sx == null) return; sx = null; e.stopPropagation();
+    if (moved) { el._suppressClick = true; endZoomGesture(); setTimeout(() => el._suppressClick = false, 60); }
   };
-  row.addEventListener('pointerup', end); row.addEventListener('pointercancel', end);
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
 }
+function bindZoomRowDrag(row) { bindWheelDrag(row); }
 
 /* ---------- viewfinder gestures: pinch to zoom, swipe for mode, press-and-hold to focus ---------- */
 function bindViewfinderGestures(vf) {
@@ -900,7 +938,7 @@ function bindViewfinderGestures(vf) {
   const up = e => {
     if (!pts.has(e.pointerId)) return;
     const p = pts.get(e.pointerId); pts.delete(e.pointerId); clearTimeout(hold);
-    if (pinch) { if (pts.size < 2) { pinch = null; settleZoom(); hideDialSoon(); } return; }
+    if (pinch) { if (pts.size < 2) { pinch = null; endZoomGesture(); } return; }
     if (swipe && e.type === 'pointerup') {
       const dx = p.x - swipe.x, dy = p.y - swipe.y, dt = Date.now() - swipe.t;
       if (Math.abs(dx) > 50 && Math.abs(dy) < 60 && dt < 600 && !CAM.rec) switchMode(dx > 0 ? 'video' : 'photo');
@@ -963,6 +1001,8 @@ function camUpdate() {
   const opts = $('.cam-opts', CAM.el), ch = $('.cam-chev', CAM.el);
   opts.hidden = !CAM.optsOpen || !!CAM.rec; $('.cam-modes', CAM.el).style.visibility = CAM.rec ? 'hidden' : '';
   if (CAM.optsOpen) renderDiag();
+  const tl = $('.cam-tele', CAM.el); tl.hidden = !lensOfKind('tele');
+  if (!tl.hidden) tl.querySelector('select').value = String(teleFactor());
   ch.innerHTML = CAM.optsOpen ? ICON.chevUp : ICON.chevDown; ch.setAttribute('aria-expanded', CAM.optsOpen); ch.hidden = !!CAM.rec;
   $('.cam-timer', CAM.el).hidden = !CAM.rec;
   CAM.el.querySelectorAll('[data-cam="native"],[data-cam="done"]').forEach(x => x.disabled = !!CAM.rec);
@@ -1003,8 +1043,7 @@ async function onCamClick(e) {
   if (a === 'zoom') {
     if ($('.cam-zoomrow', CAM.el)._suppressClick) return;
     const p = zoomPresets()[+b.dataset.i]; if (!p) return;
-    if (b.classList.contains('on') && p.z !== null && Math.abs(CAM.zoom - p.z) > 0.05) return zoomTo(p.z, p.lens); // tap active button: snap back to its preset
-    return zoomTo(p.z, p.lens);
+    return setZoom(p.z);
   }
   if (a === 'torch') {
     if (CAM.track && !(CAM.caps && CAM.caps.torch)) { toast(CAM.lenses.length ? 'Flash isn’t available on this lens — try the 1× lens' : 'Flash isn’t available on this camera'); return; }
