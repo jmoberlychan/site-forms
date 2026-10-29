@@ -408,3 +408,14 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) { .cam * { transition: none !important; } }
 .cam.page-rot { inset: auto; }
 .cam-view, .cam-freeze { transform-origin: 50% 50%; }
+
+/* ---------- v1.4.6 ---------- */
+/* the recording timer and the options chevron stay still when the phone turns (like the iPhone Camera) */
+.cam-chev svg, .cam-timer { transform: none !important; }
+/* video: the picture runs full width behind the controls, as in the iPhone Camera */
+.cam.is-video .cam-stage { position: absolute; inset: 0; z-index: 0; }
+.cam.is-video .cam-top, .cam.is-video .cam-bottom { position: relative; z-index: 3; }
+.cam.is-video .cam-bottom { margin-top: auto; background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.45) 30%); }
+.cam.is-video .cam-top { background: linear-gradient(rgba(0,0,0,.45), rgba(0,0,0,0)); }
+.cam-zoomrow { bottom: calc(12px + var(--lift, 0px)); }
+.cam-dial { bottom: var(--lift, 0px); }

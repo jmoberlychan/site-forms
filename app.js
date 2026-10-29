@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.4.5';
+const APP_VERSION = '1.4.6';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -800,6 +800,10 @@ function fitViewfinder() {
   const ar = vw / vh; let w = W, h = W / ar;
   if (h > H) { h = H; w = H * ar; }
   vf.style.width = Math.round(w) + 'px'; vf.style.height = Math.round(h) + 'px';
+  // when the picture runs behind the bottom controls (video), lift the zoom buttons above them
+  // (layout sizes, so this is right even when the camera screen is turned back after iOS rotates the page)
+  const behind = CAM.mode === 'video', ctrlTop = behind ? H - $('.cam-bottom', CAM.el).offsetHeight : H;
+  vf.style.setProperty('--lift', Math.max(0, Math.round((H + h) / 2 - ctrlTop)) + 'px');
   // when the page is rotated the <video> itself is turned 90°, so give it the swapped size
   if (CAM.pageAngle) { v.style.width = Math.round(h) + 'px'; v.style.height = Math.round(w) + 'px'; v.style.left = Math.round((w - h) / 2) + 'px'; v.style.top = Math.round((h - w) / 2) + 'px'; }
   else { v.style.width = v.style.height = v.style.left = v.style.top = ''; }
@@ -869,6 +873,12 @@ function camPageLayout() {
 }
 // How much to turn a captured frame so it comes out upright. Not needed when iOS rotated the page
 // (the camera feed is already landscape then).
+// Turn a finger movement measured on the screen into the camera screen's own directions
+// (they differ when iOS has rotated the page and the camera screen is turned back).
+function toCamAxes(dx, dy) {
+  const a = (CAM.pageAngle || 0) * Math.PI / 180; if (!a) return [dx, dy];
+  return [dx * Math.cos(a) - dy * Math.sin(a), dx * Math.sin(a) + dy * Math.cos(a)];
+}
 function captureRotation() { return CAM.pageAngle ? 0 : -(CAM.rot || 0); }
 // Video held sideways (with rotation lock on): draw each frame turned onto a canvas and record that.
 function rotatedVideoTrack(r) {
@@ -1021,12 +1031,12 @@ function bindWheelDrag(el, opts = {}) {
   let sx = null, z0 = 1, moved = false, pid = null;
   el.addEventListener('pointerdown', e => {
     if (opts.onlyWhenOpen && !CAM.el.classList.contains('dialing')) return;
-    e.stopPropagation(); sx = e.clientX; z0 = CAM.zoom; moved = !!opts.onlyWhenOpen; pid = e.pointerId;
+    e.stopPropagation(); sx = e.clientX; el._sy = e.clientY; z0 = CAM.zoom; moved = !!opts.onlyWhenOpen; pid = e.pointerId;
     if (moved) { try { el.setPointerCapture(pid); } catch (_) {} showDial(); }
   });
   el.addEventListener('pointermove', e => {
     if (sx == null) return;
-    const dx = e.clientX - sx; if (Math.abs(dx) < 6 && !moved) return;
+    const dx = toCamAxes(e.clientX - sx, e.clientY - el._sy)[0]; if (Math.abs(dx) < 6 && !moved) return;
     if (!moved) { try { el.setPointerCapture(pid); } catch (_) {} showDial(); }
     moved = true; e.stopPropagation();
     const pxPerOctave = Math.max(70, (DIAL.R || 400) * DIAL.degPerOctave * Math.PI / 180);
@@ -1063,7 +1073,7 @@ function bindViewfinderGestures(vf) {
     const p = pts.get(e.pointerId); pts.delete(e.pointerId); clearTimeout(hold);
     if (pinch) { if (pts.size < 2) { pinch = null; endZoomGesture(); } return; }
     if (swipe && e.type === 'pointerup') {
-      const dx = p.x - swipe.x, dy = p.y - swipe.y, dt = Date.now() - swipe.t;
+      const [dx, dy] = toCamAxes(p.x - swipe.x, p.y - swipe.y), dt = Date.now() - swipe.t;
       if (Math.abs(dx) > 50 && Math.abs(dy) < 60 && dt < 600 && !CAM.rec) switchMode(dx > 0 ? 'video' : 'photo');
       else if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 400) pressFocus(p.x, p.y, false);
     }
@@ -1163,7 +1173,7 @@ async function switchMode(m) {
   if (m === 'video') ensureAudio(); else dropAudio();
   readCaps(); const { min, max } = zoomLimits(); CAM.zoom = Math.min(max, Math.max(min, CAM.zoom));
   if (!digitalAllowed() && !CAM.native) setZoom(lensBase()); else applyZoom();
-  fitViewfinder(); camUpdate();
+  camUpdate(); requestAnimationFrame(fitViewfinder);
 }
 async function ensureAudio() {
   if (CAM.audio && CAM.audio.readyState === 'live') return;
