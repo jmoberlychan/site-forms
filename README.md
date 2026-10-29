@@ -42,9 +42,30 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
      - **Quality:** photos are frames from the camera feed (about 8 MP). They are not Live Photos. Videos are recorded at 1080p or 4K (set in Settings) and stop automatically at 5 minutes or about 300 MB, whichever comes first. While recording, the timer shows how much time is left.
 8. **Notes:** each condition has a **Note** field. Each unit and component also has its own General notes box.
 9. **Export:** choose what to export (spreadsheet + photos, photos only, or spreadsheet only), which copies (sorted, unsorted, or both), and which photos (not yet exported, or all). **Sorted** puts renamed photos in `Photos/<Unit>/<Component>/`. **Unsorted** puts every photo in one `Unsorted/` folder with two sub-folders: `Original names/` and `Renamed/`. Unzip the ZIP and keep the spreadsheet next to the Photos folder; then the photo links open from Excel.
-   - **Unzipping on Windows:** extract every ZIP (all parts) into the **same** folder, close to `C:\` — for example `C:\Inspections\24-118`. Parts are designed to merge into one folder tree, and a short path keeps Windows under its 260-character path limit.
+   - **ZIP size:** set in **Settings → Export part size**, from 250 MB up to 10 GB (2 GB by default). The ZIP is built from the files already on the phone, so big parts don't run the phone out of memory. When you save a ZIP, iOS briefly needs free space about the size of the ZIP. Each copy counts: with Sorted + Unsorted, one 7 MB photo adds about 21 MB, so a 10 GB ZIP holds about 480 photos.
+   - **Spreadsheet:** its name includes your initials and the time, for example `24-118_Defects_JM_20261029-173012.xlsx`. The PC combine tool keeps only the newest one for each inspector.
+   - **Combining on the PC:** use the combine tool (below) rather than unzipping by hand.
    - **Did it save?** After each Save / share, the app asks whether the file arrived. Only **Yes** marks those photos as exported. If you tap **Not sure**, they stay unexported and go into the next export.
-   - A single video bigger than the ZIP part size goes into a ZIP part of its own. The app warns before packing anything over about 400 MB.
+   - A single video bigger than the ZIP part size goes into a ZIP part of its own.
+   - **Defective, no photo:** if any condition is marked 1 with no photo, the Export panel says how many. Tap it for the list; tap a row to go straight to that unit, component and condition. A bar at the bottom then shows **No photo: 1 of 5** with **Next ›** to step through the rest. The same list is in **Menu → Defective, no photo**.
+
+## Combining exports on the PC
+
+`Combine Site Defects exports.cmd` puts every export, from every inspector, into one folder per project, so you don't end up with many folders that each hold a few photos.
+
+1. Collect everyone's export ZIPs in one folder on the PC (for example a project folder in Downloads).
+2. Put `Combine Site Defects exports.cmd` in that folder and double-click it. (You can also drag ZIPs onto it.) The first time, Windows may say it protected your PC: click **More info → Run anyway**.
+3. Press Enter to combine into `C:\Inspections`, or type another folder. Each project gets one folder, for example `C:\Inspections\24-118 Inspection`, with one `Photos\Unit\Component` tree. Files already there are skipped, and nothing is ever overwritten: if two different files have the same name, both are kept.
+4. The newest spreadsheet for each inspector is kept beside the Photos folder; older ones are removed from that folder (they're still inside the original ZIPs). The spreadsheet's photo links open from there.
+5. The tool writes a **receipt** in the project's `Receipts` folder and opens it in Explorer. Send it to each inspector by email, Teams or AirDrop.
+
+Run it as often as you like: each run adds only what's new, and its receipt covers everything in the folder.
+
+## Clearing space on the phone automatically
+
+On the iPhone, save the receipt to Files, then in the app: **Menu → Load PC receipt**. The app checks each photo against the receipt: it counts as confirmed only if the PC has it in the same unit and component folder, with the same file size. Photos that aren't in the receipt (not exported yet, exported Unsorted only, or moved to another unit since) are never removed.
+
+Confirmed photos are removed from the phone automatically once they're older than **Settings → Keep confirmed photos on the phone for** (3 days by default; it can be set to today only, 7 or 14 days, or never). If storage is over 80% full, confirmed photos older than today are removed sooner. Thumbnails, results, notes and links stay, so the spreadsheet is unchanged. The check runs whenever the app opens and whenever a receipt is loaded.
 
 ## Screen zoom
 
@@ -77,18 +98,19 @@ Units, components and conditions that are no longer in the file are kept if they
 
 - Photos are kept inside the app's private storage on the iPhone. They are not in the Photos app or iCloud Drive, and nothing is deleted automatically when a project ends.
 - iOS decides how much space the app may use. It's a share of the phone's free space, so freeing space on the phone raises the limit. **Settings & storage** shows how much is used.
-- After exporting, **Settings & storage → Free up space** removes the exported full-size photos from the phone. Thumbnails, results and links stay.
+- Space is cleared automatically once the PC has confirmed it has the photos (see above).
+- **Settings & storage → Free up space** still works as before: it removes every exported full-size photo, whether or not the PC has confirmed it. Thumbnails, results and links stay.
 - When a project is finished and everything is exported and saved, delete it from **Menu → Projects**.
 
 ## Good habits
 
 - Export **"Spreadsheet + new photos"** at the end of each site day. This is your backup. The app's data lives only on the phone, and deleting the app deletes it.
-- Large photo sets are split into ZIP parts automatically. The part size is in Settings.
+- Export new photos as often as you like during the day; combine them on the PC and load the receipt to free space. Planning figure: about 7 MB per photo on an iPhone 17 Pro (21 MB in the ZIP with both Sorted and Unsorted copies).
 - If storage gets tight, choose **Settings → Photo size → Medium**.
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed.
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
 
 To go back to a version, upload **all 10 files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 

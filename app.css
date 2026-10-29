@@ -443,3 +443,15 @@ html.in-browser .tag { top: var(--bb-h, 32px); }
 .viewer-wrap { overflow: hidden; border-radius: 8px; background: #000; }
 .viewer-wrap .viewer-img { border-radius: 0; touch-action: none; transform-origin: center center; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; will-change: transform; }
 .viewer-hint { margin: 4px 0 0; font-size: 13px; }
+
+/* ---------- v1.7.1 ---------- */
+/* "N defective conditions have no photo" is a button that opens the list */
+.warn-link { background: transparent; border: 0; padding: 4px 0; color: var(--r1); display: block; width: 100%; text-align: left; font-family: inherit; cursor: pointer; }
+/* Going through defective conditions with no photo, one by one */
+.miss-nav { position: fixed; left: 12px; right: 12px; bottom: calc(84px + var(--safe-b)); z-index: 30; display: flex; gap: 6px; align-items: center;
+  background: var(--ink); color: var(--paper); border-radius: 12px; padding: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+.miss-nav button { background: transparent; border: 0; color: inherit; font: inherit; font-size: 15px; min-height: 40px; padding: 0 10px; }
+.miss-nav #mn-list { flex: 1; text-align: left; }
+.miss-nav #mn-next { background: var(--tag-ink); color: #000; border-radius: 8px; font-weight: 700; }
+@keyframes flash { 0%, 60% { box-shadow: 0 0 0 3px var(--tag-ink); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.defect.flash { animation: flash 1.8s ease-out; }

@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.7.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -40,7 +40,7 @@ async function byProject(store, pid) { const d = await db(); return reqP(d.trans
 
 /* ================= State ================= */
 const S = {
-  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250, batch: 1, camera: 'native', vidQ: '1080', lockZoom: true },
+  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 2048, keepDays: 3, batch: 1, camera: 'native', vidQ: '1080', lockZoom: true },
   projects: [],
   project: null,
   obs: new Map(),        // key -> obs
@@ -60,6 +60,8 @@ async function saveProject() { S.project.updatedAt = Date.now(); await put('proj
 async function loadAll() {
   const s = await get('meta', 'settings');
   if (s) { delete s.k; Object.assign(S.settings, s); }
+  // 1.7.1: ZIPs are no longer built in memory, so parts can be much bigger
+  if ((S.settings.partV || 0) < 2) { if (!(S.settings.partMB >= 2048)) S.settings.partMB = 2048; if (S.settings.keepDays == null) S.settings.keepDays = 3; S.settings.partV = 2; }
   S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   const p = S.projects.find(x => x.id === S.settings.activeProjectId) || S.projects[0] || null;
   await activate(p);
@@ -151,7 +153,8 @@ function unitsInOrder() {
 }
 const isAddedComp = c => (S.project.addedComps || []).includes(c);
 const isOrphanComp = c => (S.project.orphanComps || []).includes(c);
-function mb(n) { return (n / 1048576).toFixed(n > 1048576 * 100 ? 0 : 1) + ' MB'; }
+function mb(n) { return n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : (n / 1048576).toFixed(n > 1048576 * 100 ? 0 : 1) + ' MB'; }
+const PHOTO_EST = 7 * 1048576;   // planning size of one full-resolution photo (iPhone 17 Pro: about 5 MB)
 
 let toastT;
 function toast(msg) {
@@ -450,6 +453,7 @@ async function addPhotos(files, linkDefectId) {
       const taken = new Set(S.photos.map(origNameOf));
       if (taken.has(orig)) { const base = orig.replace(/\.\w+$/, ''); let k = 2; while (taken.has(`${base}_${k}.${ext}`)) k++; orig = `${base}_${k}.${ext}`; }
       const meta = { id: uid(), projectId: S.project.id, kind: vid ? 'video' : 'photo', ext, name, origName: orig, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exp: { r: null, o: null } };
+      if (!vid) { meta.crc = await crcOfBlob(full); meta.crcSize = full.size; }   // checksum for the ZIP, worked out now while the photo is in memory
       const d = await db(); const t = d.transaction(['photos', 'blobs', 'thumbs'], 'readwrite');
       t.objectStore('photos').put(meta); t.objectStore('blobs').put(full, meta.id); t.objectStore('thumbs').put(thumb, meta.id);
       await txDone(t);
@@ -1806,6 +1810,114 @@ async function movePhotosToUnit(photos, unit) {
   return r;
 }
 
+/* ================= Defective conditions with no photo ================= */
+function missingList() {
+  if (!S.project) return [];
+  const rank = new Map(unitsInOrder().map((u, i) => [u.label, i]));
+  const dIdx = new Map(S.project.defects.map((d, i) => [d.id, i]));
+  return [...S.obs.values()]
+    .filter(o => o.value === '1' && !(o.photoIds || []).length && !isGeneral(o.defectId) && defectById(o.defectId))
+    .sort((a, b) => (rank.get(a.unit) ?? 1e9) - (rank.get(b.unit) ?? 1e9) || dIdx.get(a.defectId) - dIdx.get(b.defectId))
+    .map(o => ({ key: o.key, unit: o.unit, d: defectById(o.defectId) }));
+}
+function missingSheet() {
+  const list = missingList();
+  openSheet({
+    title: 'Defective, no photo',
+    body: list.length ? `<p class="note">${list.length} condition${list.length > 1 ? 's are' : ' is'} marked 1 with no photo linked. Tap one to go to it.</p>
+      <ul class="list">${list.map((m, i) => `<li><button data-mi="${i}"><span><b>Unit ${esc(m.unit)}</b><span class="sub">${esc(m.d.component)} · ${m.d.code ? esc(m.d.code) + ' ' : ''}${esc(m.d.label)}</span></span><span class="meta">›</span></button></li>`).join('')}</ul>`
+      : '<p>Every defective condition has a photo linked.</p>',
+    foot: '<button class="btn" data-close>Close</button>',
+    mount(el, close) { el.addEventListener('click', e => { const b = e.target.closest('[data-mi]'); if (b) { close(); goToMissing(list[+b.dataset.mi].key); } }); }
+  });
+}
+let missKey = null, missIdx = 0;
+async function goToMissing(key) {
+  const list = missingList();
+  let i = list.findIndex(m => m.key === key); if (i < 0) i = Math.min(missIdx, list.length - 1);
+  const m = list[i];
+  if (!m) { hideMissNav(); toast('Every defective condition now has a photo'); return; }
+  document.querySelectorAll('#sheet-root .scrim [data-close]').forEach(b => b.click());
+  missKey = m.key; missIdx = i;
+  S.project.state.unit = m.unit; S.project.state.component = m.d.component; await saveProject(); render();
+  showMissNav(i, list.length);
+  requestAnimationFrame(() => {
+    const sec = document.querySelector(`.defect[data-d="${CSS.escape(m.d.id)}"]`);
+    if (sec) { sec.scrollIntoView({ block: 'center', behavior: 'smooth' }); sec.classList.remove('flash'); void sec.offsetWidth; sec.classList.add('flash'); }
+  });
+}
+function nextMissing() {
+  const list = missingList();
+  if (!list.length) { hideMissNav(); toast('Every defective condition now has a photo'); return; }
+  const i = list.findIndex(m => m.key === missKey);
+  goToMissing(list[i < 0 ? Math.min(missIdx, list.length - 1) : (i + 1) % list.length].key);   // a fixed one drops out of the list
+}
+function showMissNav(i, n) {
+  let bar = document.getElementById('miss-nav');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'miss-nav'; bar.className = 'miss-nav';
+    document.body.appendChild(bar);
+    bar.addEventListener('click', e => {
+      if (e.target.closest('#mn-next')) nextMissing();
+      else if (e.target.closest('#mn-list')) missingSheet();
+      else if (e.target.closest('#mn-x')) hideMissNav();
+    });
+  }
+  bar.innerHTML = `<button id="mn-list">No photo: <b>${i + 1} of ${n}</b></button><button id="mn-next">${n > 1 ? 'Next ›' : 'Done ✓'}</button><button id="mn-x" aria-label="Close">✕</button>`;
+  if (n <= 1) $('#mn-next', bar).id = 'mn-x';
+}
+function hideMissNav() { const b = document.getElementById('miss-nav'); if (b) b.remove(); missKey = null; }
+
+/* ================= PC receipt + automatic clean-up ================= */
+// The PC combine tool lists every photo it actually unpacked (path + size). A photo counts as confirmed only if the
+// receipt has it at its CURRENT sorted folder and size, so a photo moved after export is never treated as safe.
+const projRoot = p => `${safeName(p.number)} Inspection`;
+const isConfirmed = p => !!(p.rcv && p.rcv.path === photoPath(p) && p.rcv.size === p.size);
+function loadReceipt() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json,text/plain';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    let r;
+    try { r = JSON.parse(await f.text()); } catch (_) { alertSheet('Not a receipt', 'That file isn’t a receipt from the PC combine tool.'); return; }
+    if (!r || r.type !== 'site-defects-receipt' || !Array.isArray(r.files)) { alertSheet('Not a receipt', 'That file isn’t a receipt from the PC combine tool.'); return; }
+    const projs = S.projects.filter(p => projRoot(p).toLowerCase() === String(r.root || '').toLowerCase());
+    if (!projs.length) { alertSheet('Different project', `This receipt is for “${r.root}”, which isn’t on this phone.`); return; }
+    busy('Checking receipt…');
+    const have = new Map(r.files.map(x => [String(x.p), +x.s]));
+    const at = Date.now(); let yes = 0, notYet = 0;
+    const d = await db(); const t = d.transaction('photos', 'readwrite');
+    for (const pr of projs) {
+      const live = pr.id === (S.project && S.project.id) ? S.photos : await byProject('photos', pr.id);
+      for (const ph of live) {
+        if (ph.removed) continue;
+        const path = photoPath(ph);
+        if (have.get(path) === ph.size) { if (!isConfirmed(ph)) { ph.rcv = { path, size: ph.size, at, made: r.created || '' }; t.objectStore('photos').put(ph); } yes++; }
+        else notYet++;
+      }
+    }
+    await txDone(t); busy(null);
+    const cleaned = await autoClean(true);
+    alertSheet('Receipt loaded', `${projs[0].number}: the PC has ${yes} of this phone’s photos.${notYet ? `\n\n${notYet} photo${notYet > 1 ? 's on this phone are' : ' on this phone is'} not in the receipt yet (not exported, not combined yet, exported Unsorted only, or moved since). ${notYet > 1 ? 'They' : 'It'} will be kept.` : ''}${cleaned.n ? `\n\nRemoved ${cleaned.n} confirmed photo${cleaned.n > 1 ? 's' : ''} (${mb(cleaned.bytes)}) older than your keep setting. Thumbnails, results and links stay.` : `\n\nConfirmed photos are removed automatically once they’re older than your keep setting (Settings).`}`);
+    render();
+  };
+  inp.click();
+}
+async function autoClean(quiet) {
+  const keep = S.settings.keepDays ?? 3; if (!keep) return { n: 0, bytes: 0 };
+  await refreshStorage();
+  const sod = new Date(); sod.setHours(0, 0, 0, 0);
+  const cutoff = storageFrac > 0.8 ? sod.getTime() : sod.getTime() - (keep - 1) * 86400000;
+  const live = new Map(S.photos.map(p => [p.id, p]));
+  const go = (await getAll('photos')).map(p => live.get(p.id) || p).filter(p => !p.removed && isConfirmed(p) && p.takenAt < cutoff);
+  if (!go.length) return { n: 0, bytes: 0 };
+  const d = await db(); const t = d.transaction(['photos', 'blobs'], 'readwrite'); const now = Date.now(); let bytes = 0;
+  for (const p of go) { p.removed = now; p.autoRemoved = true; t.objectStore('photos').put(p); t.objectStore('blobs').delete(p.id); bytes += p.size || 0; }
+  await txDone(t);
+  if (!quiet) { toast(`Cleared ${go.length} photo${go.length > 1 ? 's' : ''} the PC has confirmed (${mb(bytes)})`); render(); }
+  refreshStorage();
+  return { n: go.length, bytes };
+}
+
 /* ================= Photo viewer ================= */
 // The viewer's own pinch and double-tap zoom (works with the screen zoom lock on).
 function zoomable(img) {
@@ -1865,7 +1977,7 @@ async function viewPhoto(id) {
   const comp = !p.defectIds.length && ctx().unit === p.unit && ctx().component ? ctx().component : p.component; const ds = defectsFor(comp);
   const draw = el => {
     $('.sheet-body', el).innerHTML = `${isVideo(p) && url ? `<video class="viewer-img" src="${url}" controls playsinline preload="metadata"></video>` : `<div class="viewer-wrap"><img class="viewer-img zoomable" src="${url || tsrc}" alt="" draggable="false"></div><p class="note viewer-hint">Pinch or double-tap the photo to zoom.</p>`}
-      ${url ? '' : '<p class="note">The full-size file was exported and removed from this phone to free space. This is the thumbnail.</p>'}
+      ${url ? '' : `<p class="note">The full-size file was exported and removed from this phone to free space${p.rcv ? ` (the PC confirmed it has it${p.rcv.made ? ', ' + esc(String(p.rcv.made).slice(0, 10)) : ''})` : ''}. This is the thumbnail.</p>`}
       <div class="fname">${esc(p.name)}</div>
       <div class="path">Original: ${esc(origNameOf(p))}</div>
       <div class="path">${esc(photoPath(p))} · ${fmtTime(p.takenAt)} · ${mb(p.size || 0)}</div>
@@ -2091,6 +2203,8 @@ function openMenu() {
       <li><button id="m-cam"><span>Camera: ${S.settings.camera === 'builtin' ? 'Built-in (trial)' : 'iPhone camera'}<span class="sub">Tap to switch to ${S.settings.camera === 'builtin' ? 'the iPhone camera' : 'the built-in camera'}</span></span><span class="meta">⇄</span></button></li>
       <li><button id="m-lists"><span>Edit lists<span class="sub">Add units, components and conditions · delete ones added on site</span></span><span class="meta">›</span></button></li>
       <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
+      <li><button id="m-miss"><span>Defective, no photo<span class="sub">${missingList().length ? missingList().length + ' condition' + (missingList().length > 1 ? 's' : '') + ' marked 1 with no photo linked' : 'Every defective condition has a photo'}</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-rcv"><span>Load PC receipt<span class="sub">From the PC combine tool · lets the app clear confirmed photos automatically</span></span><span class="meta">›</span></button></li>
       <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
       <li><button id="m-tpl"><span>Get the Excel template</span><span class="meta">›</span></button></li>
     </ul><p class="note" style="margin-top:14px">Version ${APP_VERSION}${pageVersion() && pageVersion() !== APP_VERSION ? ` <b class="warn">(page ${esc(pageVersion())} — files out of step: re-upload all app files)</b>` : ''}. Data is stored only on this phone. Export regularly as a backup.</p>`,
@@ -2100,6 +2214,8 @@ function openMenu() {
       $('#m-lists', el).onclick = () => { close(); editListsSheet(); };
       $('#m-cam', el).onclick = async () => { S.settings.camera = S.settings.camera === 'builtin' ? 'native' : 'builtin'; await saveSettings(); close(); toast(S.settings.camera === 'builtin' ? 'Camera: built-in (trial)' : 'Camera: iPhone camera'); };
       $('#m-export', el).onclick = () => { close(); openExport(); };
+      $('#m-miss', el).onclick = () => { close(); missingSheet(); };
+      $('#m-rcv', el).onclick = () => { close(); loadReceipt(); };
       $('#m-set', el).onclick = () => { close(); openSettings(); };
       $('#m-tpl', el).onclick = () => { close(); downloadTemplate(); };
     }
@@ -2135,7 +2251,8 @@ function openProjects() {
 async function openSettings() {
   const si = await storageInfo();
   const pct = si && si.quota ? Math.round(si.used / si.quota * 100) : null;
-  const est = si ? `${mb(si.used)} used of about ${mb(si.quota)} this app may use${pct != null ? ` (${pct}%)` : ''}` : '';
+  const est = si ? `${mb(si.used)} used of about ${mb(si.quota)} this app may use${pct != null ? ` (${pct}%)` : ''} · room for about ${Math.max(0, Math.floor((si.quota - si.used) / PHOTO_EST)).toLocaleString()} more photos at 7 MB` : '';
+  const confirmedOn = S.photos.filter(p => hasBlob(p) && isConfirmed(p)).length;
   let persisted = false; try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : false; } catch (_) {}
   const onPhone = S.photos.filter(hasBlob);
   const freeable = onPhone.filter(p => p.exp.r || p.exp.o);
@@ -2154,14 +2271,22 @@ async function openSettings() {
         <option value="0">Full resolution (largest files)</option><option value="3000">Large · 3000 px</option><option value="2000">Medium · 2000 px (about ¼ the storage)</option></select>
         <span class="hint">Applies to new photos (videos are always kept as recorded), to both the original and the renamed copy. The phone stores each photo once; the two copies are made when you export.</span></div>
       <div class="field"><label for="s-part">Export part size</label><select id="s-part">
-        <option value="150">150 MB per ZIP</option><option value="250">250 MB per ZIP</option><option value="500">500 MB per ZIP</option></select>
-        <span class="hint">Large photo exports are split into parts so the phone doesn’t run out of memory.</span></div>
+        <option value="250">250 MB per ZIP</option><option value="500">500 MB per ZIP</option><option value="1024">1 GB per ZIP</option><option value="2048">2 GB per ZIP</option><option value="5120">5 GB per ZIP</option><option value="10240">10 GB per ZIP</option></select>
+        <span class="hint">Bigger exports are split into ZIPs of this size. Each copy counts: with Sorted + Unsorted, one 7 MB photo adds about 21 MB. When you save a ZIP, iOS briefly needs free space about the size of the ZIP.</span></div>
       <div class="section-h">Storage</div>
       ${pct != null ? `<div class="meter" aria-hidden="true"><span style="width:${Math.min(100, pct)}%" class="${pct > 80 ? 'hot' : ''}"></span></div>` : ''}
       <p class="note">${esc(est || 'Storage estimate not available')}<br>${persisted ? 'Storage is protected from automatic clean-up.' : 'Keep exporting regularly — iOS may clear app storage if the phone runs critically low on space.'}</p>
       <div class="kv"><span>Photos on this phone</span><span>${onPhone.length}</span><span>Not yet exported</span><span>${notExp}</span><span>Exported, still on phone</span><span>${freeable.length} (${mb(freeMB)})</span><span>Already removed</span><span>${S.photos.length - onPhone.length}</span></div>
+      <div class="section-h">Automatic clean-up</div>
+      <p class="note">Full-size photos are removed from this phone only after the <b>PC combine tool</b> has confirmed it has them (its receipt is loaded with <b>Menu → Load PC receipt</b>). Thumbnails, results, notes and links stay. Nothing unconfirmed is ever removed.</p>
+      <div class="field"><label for="s-keep">Keep confirmed photos on the phone for</label><select id="s-keep">
+        <option value="1">Today only</option><option value="3">3 days</option><option value="7">7 days</option><option value="14">14 days</option><option value="0">Never remove automatically</option></select>
+        <span class="hint">If storage is over 80% full, confirmed photos older than today are removed sooner.</span></div>
+      <div class="kv"><span>Confirmed by the PC, still on phone</span><span>${confirmedOn}</span></div>
+      <button class="btn ghost" id="s-rcv" style="width:100%">Load PC receipt</button>
+      <div class="section-h">Manual</div>
       <button class="btn ghost" id="s-free" style="width:100%" ${freeable.length ? '' : 'disabled'}>Free up space — remove ${freeable.length} exported photos</button>
-      <p class="note">Removes the full-size photos you’ve already exported from this phone. Thumbnails, results, notes and photo links stay, so the spreadsheet is unchanged.</p>`,
+      <p class="note">Removes the full-size photos you’ve already exported from this phone, whether or not the PC has confirmed them. Thumbnails, results, notes and photo links stay, so the spreadsheet is unchanged.</p>`,
     foot: `<button class="btn" id="s-save">Save</button>`,
     onClose() { applyZoomLock(); },   // closing without Save keeps the saved zoom setting
     mount(el, close) {
@@ -2178,12 +2303,14 @@ async function openSettings() {
       $('#s-lockzoom', el).checked = S.settings.lockZoom !== false;
       $('#s-lockzoom', el).onchange = e => applyZoomLock(e.target.checked);   // takes effect straight away (saved with Save)
       $('#s-vq', el).value = S.settings.vidQ || '1080';
-      $('#s-part', el).value = String(S.settings.partMB || 250);
+      $('#s-part', el).value = String(S.settings.partMB || 2048);
+      $('#s-keep', el).value = String(S.settings.keepDays ?? 3);
+      $('#s-rcv', el).onclick = () => { close(); loadReceipt(); };
       $('#s-save', el).onclick = async () => {
         const v = $('#s-ini', el).value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!v) { toast('Initials can’t be empty'); return; }
-        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value;
-        await saveSettings(); close(); render(); toast('Settings saved');
+        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value; S.settings.keepDays = +$('#s-keep', el).value;
+        await saveSettings(); close(); render(); toast('Settings saved'); autoClean();
       };
     }
   });
@@ -2353,7 +2480,7 @@ function buildWorkbook() {
     ['Observations', 'One row per unit and condition with notes and links to every proof photo. Filter by unit, component or result.'],
     ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
     ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
-    ['Unzipping', 'Extract every export ZIP into the SAME folder, close to C:\\ (for example C:\\Inspections\\24-118). Windows "Extract All" makes a new folder per ZIP by default, which breaks links to photos from earlier exports, and deep folders can exceed Windows\' 260-character path limit.'],
+    ['Unzipping', 'Use the PC combine tool (Combine Site Defects exports.cmd): it unpacks every export ZIP, from every inspector, into one folder per project (C:\\Inspections\\<project> Inspection) and keeps only the newest spreadsheet per inspector. By hand: extract every ZIP into the SAME folder, close to C:\\. Windows "Extract All" makes a new folder per ZIP by default, which breaks links to photos from earlier exports.'],
     ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component.'],
     ['Unsorted folder', 'Every photo in one place, not sorted by unit: “Original names” has the photos under their original file names, “Renamed” has the same photos under their new names. The Photo Log matches each original to its renamed copy.'],
     ['Schedule', 'Units marked in the Schedule column of the Unit Matrix were on the visit schedule from the import file.'],
@@ -2391,7 +2518,7 @@ function openExport() {
     body: `<div class="kv"><span>Defective (1)</span><span>${c1}</span><span>Observed (1 + 0)</span><span>${c1 + c0}</span>
         <span>NA / NR</span><span>${vals.filter(o => o.value === 'NA').length} / ${vals.filter(o => o.value === 'NR').length}</span>
         <span>Photos on this phone</span><span>${onPhone.length}</span>${removed ? `<span>Removed after export</span><span>${removed}</span>` : ''}</div>
-      ${missing ? `<p class="warn">${missing} defective condition${missing > 1 ? 's have' : ' has'} no photo linked.</p>` : ''}
+      ${missing ? `<button class="warn warn-link" id="x-missing">${missing} defective condition${missing > 1 ? 's have' : ' has'} no photo linked. <u>Show ${missing > 1 ? 'them' : 'it'}</u> ›</button>` : ''}
       <div class="section-h">What to export</div>${seg('what', [['both', 'Spreadsheet + photos'], ['photos', 'Photos only'], ['xls', 'Spreadsheet only']])}
       <div id="x-photo-opts">
         <div class="section-h">Which copies</div>${seg('copies', [['r', 'Sorted'], ['o', 'Unsorted'], ['b', 'Both']])}
@@ -2407,12 +2534,13 @@ function openExport() {
         $('#x-photo-opts', el).hidden = opt.what === 'xls';
         const ps = pick(); const bytes = ps.reduce((s, p) => s + (p.size || 0), 0) * COPY_MULT[opt.copies];
         $('#x-sum', el).innerHTML = opt.what === 'xls' ? 'One Excel file.'
-          : `<b>${ps.length} photo${ps.length === 1 ? '' : 's'}</b> (${COPY_LABEL[opt.copies]}) · about ${mb(bytes)}${bytes > (S.settings.partMB || 250) * 1048576 ? ` · split into ${Math.ceil(bytes / ((S.settings.partMB || 250) * 1048576))}+ ZIP parts` : ''}`;
+          : `<b>${ps.length} photo${ps.length === 1 ? '' : 's'}</b> (${COPY_LABEL[opt.copies]}) · about ${mb(bytes)}${bytes > (S.settings.partMB || 2048) * 1048576 ? ` · split into ${Math.ceil(bytes / ((S.settings.partMB || 2048) * 1048576))}+ ZIPs of up to ${mb((S.settings.partMB || 2048) * 1048576)}` : ''}`;
         $('#x-go', el).disabled = opt.what === 'photos' && !ps.length;
       };
       draw();
       el.addEventListener('click', async e => {
         const b = e.target.closest('[data-seg]'); if (b) { opt[b.dataset.seg] = b.dataset.v; draw(); return; }
+        if (e.target.closest('#x-missing')) { close(); missingSheet(); return; }
         if (e.target.id === 'x-go') {
           S.settings.exportOpt = { ...opt }; await saveSettings();
           const ps = pick();
@@ -2423,10 +2551,67 @@ function openExport() {
     }
   });
 }
-const BIG_ITEM = 400 * 1048576;
+/* ---------- ZIP writer: no compression, built from the stored files, ZIP64 above 4 GB ---------- */
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+async function crcOfBlob(blob) {
+  let c = 0xFFFFFFFF; const CH = 8 * 1048576;
+  for (let o = 0; o < blob.size; o += CH) {
+    const u = new Uint8Array(await blob.slice(o, o + CH).arrayBuffer());
+    for (let i = 0; i < u.length; i++) c = CRC_T[(c ^ u[i]) & 255] ^ (c >>> 8);
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+let ZIP64_AT = 0xFFFFFFFF;   // sizes/offsets at or above this use the ZIP64 fields (tests lower it)
+function dosTime(t) { const d = new Date(t); return { time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), date: ((Math.max(1980, d.getFullYear()) - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate() }; }
+function zipBlob(entries) {
+  const enc = new TextEncoder(); const parts = [], cd = []; let off = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.path), size = e.blob.size, big = size >= ZIP64_AT, { time, date } = dosTime(e.date);
+    const lh = new DataView(new ArrayBuffer(30 + name.length + (big ? 20 : 0)));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, big ? 45 : 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, time, true); lh.setUint16(12, date, true); lh.setUint32(14, e.crc >>> 0, true);
+    lh.setUint32(18, big ? 0xFFFFFFFF : size, true); lh.setUint32(22, big ? 0xFFFFFFFF : size, true);
+    lh.setUint16(26, name.length, true); lh.setUint16(28, big ? 20 : 0, true);
+    new Uint8Array(lh.buffer).set(name, 30);
+    if (big) { const x = 30 + name.length; lh.setUint16(x, 1, true); lh.setUint16(x + 2, 16, true); lh.setBigUint64(x + 4, BigInt(size), true); lh.setBigUint64(x + 12, BigInt(size), true); }
+    parts.push(lh.buffer, e.blob);
+    cd.push({ name, size, big, time, date, crc: e.crc >>> 0, off });
+    off += lh.byteLength + size;
+  }
+  const cdStart = off; let cdSize = 0;
+  for (const c of cd) {
+    const far = c.off >= ZIP64_AT, xl = (c.big ? 16 : 0) + (far ? 8 : 0), ext = xl ? xl + 4 : 0;
+    const h = new DataView(new ArrayBuffer(46 + c.name.length + ext));
+    h.setUint32(0, 0x02014b50, true); h.setUint16(4, 45, true); h.setUint16(6, c.big || far ? 45 : 20, true); h.setUint16(8, 0x0800, true);
+    h.setUint16(12, c.time, true); h.setUint16(14, c.date, true); h.setUint32(16, c.crc, true);
+    h.setUint32(20, c.big ? 0xFFFFFFFF : c.size, true); h.setUint32(24, c.big ? 0xFFFFFFFF : c.size, true);
+    h.setUint16(28, c.name.length, true); h.setUint16(30, ext, true);
+    h.setUint32(42, far ? 0xFFFFFFFF : c.off, true);
+    new Uint8Array(h.buffer).set(c.name, 46);
+    if (ext) {
+      let x = 46 + c.name.length; h.setUint16(x, 1, true); h.setUint16(x + 2, xl, true); x += 4;
+      if (c.big) { h.setBigUint64(x, BigInt(c.size), true); h.setBigUint64(x + 8, BigInt(c.size), true); x += 16; }
+      if (far) h.setBigUint64(x, BigInt(c.off), true);
+    }
+    parts.push(h.buffer); cdSize += h.byteLength;
+  }
+  const n = cd.length, z64 = n >= 0xFFFF || cdStart >= ZIP64_AT || cdSize >= ZIP64_AT || cd.some(c => c.big || c.off >= ZIP64_AT);
+  if (z64) {
+    const r = new DataView(new ArrayBuffer(76));
+    r.setUint32(0, 0x06064b50, true); r.setBigUint64(4, BigInt(44), true); r.setUint16(12, 45, true); r.setUint16(14, 45, true);
+    r.setBigUint64(24, BigInt(n), true); r.setBigUint64(32, BigInt(n), true); r.setBigUint64(40, BigInt(cdSize), true); r.setBigUint64(48, BigInt(cdStart), true);
+    r.setUint32(56, 0x07064b50, true); r.setBigUint64(64, BigInt(cdStart + cdSize), true); r.setUint32(72, 1, true);
+    parts.push(r.buffer);
+  }
+  const e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, z64 ? 0xFFFF : n, true); e.setUint16(10, z64 ? 0xFFFF : n, true);
+  e.setUint32(12, z64 ? 0xFFFFFFFF : cdSize, true); e.setUint32(16, z64 ? 0xFFFFFFFF : cdStart, true);
+  parts.push(e.buffer);
+  return new Blob(parts, { type: 'application/zip' });
+}
 async function exportRun({ photos, copies, withXls }) {
   const p = S.project; const st = stamp(Date.now());
-  const xname = `${safeName(p.number)}_Defects_${st}.xlsx`;
+  const xname = `${safeName(p.number)}_Defects_${safeName(S.settings.initials || 'XX')}_${st}.xlsx`;   // initials: the PC combine tool keeps the newest per inspector
   let xblob = null;
   if (withXls) {
     busy('Building spreadsheet…');
@@ -2436,9 +2621,7 @@ async function exportRun({ photos, copies, withXls }) {
   }
   // split into parts by size so the phone doesn't run out of memory
   const mult = COPY_MULT[copies];
-  const limit = (S.settings.partMB || 250) * 1048576;
-  const huge = photos.filter(ph => (ph.size || 0) * mult > BIG_ITEM);
-  if (huge.length && !await confirmSheet('Very large video', `${huge.length === 1 ? huge[0].name + ' is' : huge.length + ' videos are'} over ${Math.round(BIG_ITEM / 1048576)} MB in this export${mult > 1 ? ' (counting the extra copies)' : ''}. Packing ${huge.length === 1 ? 'it' : 'them'} can run the iPhone out of memory.\n\nEach one goes in its own ZIP part. If an export fails, choose Sorted only or Unsorted only to make it smaller.`, 'Continue')) return;
+  const limit = (S.settings.partMB || 2048) * 1048576;
   const parts = []; let cur = [], curSize = 0;
   for (const ph of [...photos].sort((a, b) => a.takenAt - b.takenAt)) {
     const w = (ph.size || 0) * mult;
@@ -2451,24 +2634,26 @@ async function exportRun({ photos, copies, withXls }) {
   const kind = withXls ? 'Export' : (copies === 'o' ? 'Unsorted' : copies === 'b' ? 'Photos' : 'Sorted');
   const jobs = parts.map((ph, i) => ({ photos: ph, idx: i, total: parts.length,
     name: `${safeName(p.number)}_${kind}_${st}${parts.length > 1 ? `_part${i + 1}of${parts.length}` : ''}.zip` }));
+  const xcrc = xblob ? await crcOfBlob(xblob) : 0, now = Date.now();
   shareStep(jobs.map(j => ({ lazy: async () => {
     const pre = j.total > 1 ? `part ${j.idx + 1} of ${j.total} · ` : '';
-    busy(`Packing ${pre}${j.photos.length} photos…`);
-    const zip = new JSZip(); const f = zip.folder(root);
-    if (xblob) f.file(xname, xblob);
+    busy(`Preparing ${pre}${j.photos.length} photos…`);
+    // The ZIP is assembled from the files already saved on the phone (nothing is loaded into memory), so parts can be several GB.
+    const entries = [];
+    if (xblob) entries.push({ path: root + '/' + xname, blob: xblob, crc: xcrc, date: now });
     for (let k = 0; k < j.photos.length; k++) {
       const ph = j.photos[k]; const b = await get('blobs', ph.id);
       if (b) {
-        const date = new Date(ph.takenAt);
-        if (copies !== 'o') f.file(photoPath(ph), b, { binary: true, date });
+        if (ph.crc == null || ph.crcSize !== b.size) { ph.crc = await crcOfBlob(b); ph.crcSize = b.size; await savePhotoMeta(ph); }
+        if (copies !== 'o') entries.push({ path: root + '/' + photoPath(ph), blob: b, crc: ph.crc, date: ph.takenAt });
         if (copies !== 'r') {
-          f.file('Unsorted/Original names/' + origNameOf(ph), b, { binary: true, date });
-          f.file('Unsorted/Renamed/' + ph.name, b, { binary: true, date });
+          entries.push({ path: root + '/Unsorted/Original names/' + origNameOf(ph), blob: b, crc: ph.crc, date: ph.takenAt });
+          entries.push({ path: root + '/Unsorted/Renamed/' + ph.name, blob: b, crc: ph.crc, date: ph.takenAt });
         }
       }
-      if (k % 20 === 0) busy(`Packing ${pre}${k + 1}/${j.photos.length} photos…`);
+      if (k % 10 === 0) busy(`Preparing ${pre}${k + 1}/${j.photos.length} photos…`);
     }
-    const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true });
+    const blob = zipBlob(entries);
     busy(null);
     return new File([blob], j.name, { type: 'application/zip' });
   }, photos: j.photos, copies, label: j.total > 1 ? `Part ${j.idx + 1} of ${j.total}` : 'ZIP' })));
@@ -2631,4 +2816,4 @@ function showBrowserBanner() {
 }
 showBrowserBanner();
 
-loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
+loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); setTimeout(() => autoClean().catch(() => {}), 1500); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
