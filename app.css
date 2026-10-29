@@ -423,3 +423,12 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 .tray-h { font-size: 13px; font-weight: 700; color: var(--muted); margin: 12px 0 6px; }
 /* v1.5.1: four buttons in the Unlinked window sit in a tidy 2 × 2 grid */
 .sheet-foot:has(#t-move) { display: grid; grid-template-columns: 1fr 1fr; }
+
+/* ---------- v1.6.0 screen zoom lock ---------- */
+/* pan only (no pinch-zoom) and no double-tap zoom while locked; the camera viewfinder keeps its own gestures */
+html.zoom-locked, html.zoom-locked body { touch-action: pan-x pan-y; }
+html.zoom-locked button, html.zoom-locked a, html.zoom-locked input, html.zoom-locked select, html.zoom-locked textarea, html.zoom-locked label { touch-action: manipulation; }
+html:not(.zoom-locked) button { touch-action: manipulation; }   /* fast taps on buttons either way */
+.toggle-row { align-items: flex-start; margin-bottom: 16px; }
+.toggle-row .hint { display: block; font-weight: 400; color: var(--muted); font-size: 14px; margin-top: 2px; }
+.toggle-row input { margin-top: 2px; flex: 0 0 auto; }

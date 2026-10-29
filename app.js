@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -40,7 +40,7 @@ async function byProject(store, pid) { const d = await db(); return reqP(d.trans
 
 /* ================= State ================= */
 const S = {
-  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250, batch: 1, camera: 'native', vidQ: '1080' },
+  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250, batch: 1, camera: 'native', vidQ: '1080', lockZoom: true },
   projects: [],
   project: null,
   obs: new Map(),        // key -> obs
@@ -1927,6 +1927,7 @@ async function openSettings() {
   openSheet({
     title: 'Settings',
     body: `<div class="field"><label for="s-ini">Your initials</label><input id="s-ini" value="${esc(S.settings.initials)}" maxlength="5" autocapitalize="characters"><span class="hint">Used in new photo names. Existing photos keep their names.</span></div>
+      <label class="check toggle-row"><input type="checkbox" id="s-lockzoom"><span>Lock screen zoom<span class="hint">Stops pinch and double-tap from zooming the screen in or out. Turn off if you need to zoom the screen. The camera’s own zoom always works.</span></span></label>
       <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
         <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video) — trial</option></select>
         <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
@@ -1945,6 +1946,7 @@ async function openSettings() {
       <button class="btn ghost" id="s-free" style="width:100%" ${freeable.length ? '' : 'disabled'}>Free up space — remove ${freeable.length} exported photos</button>
       <p class="note">Removes the full-size photos you’ve already exported from this phone. Thumbnails, results, notes and photo links stay, so the spreadsheet is unchanged.</p>`,
     foot: `<button class="btn" id="s-save">Save</button>`,
+    onClose() { applyZoomLock(); },   // closing without Save keeps the saved zoom setting
     mount(el, close) {
       $('#s-free', el).onclick = async () => {
         if (!await confirmSheet('Free up space?', `Remove ${freeable.length} exported photos (${mb(freeMB)}) from this phone?\n\nMake sure the exported ZIPs are saved somewhere safe (Files, OneDrive, your computer) first. Removed photos can’t be exported again from this phone.`, 'Remove photos', true)) return;
@@ -1956,12 +1958,14 @@ async function openSettings() {
       };
       $('#s-max', el).value = String(S.settings.photoMax || 0);
       $('#s-cam', el).value = S.settings.camera || 'native';
+      $('#s-lockzoom', el).checked = S.settings.lockZoom !== false;
+      $('#s-lockzoom', el).onchange = e => applyZoomLock(e.target.checked);   // takes effect straight away (saved with Save)
       $('#s-vq', el).value = S.settings.vidQ || '1080';
       $('#s-part', el).value = String(S.settings.partMB || 250);
       $('#s-save', el).onclick = async () => {
         const v = $('#s-ini', el).value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!v) { toast('Initials can’t be empty'); return; }
-        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value;
+        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value;
         await saveSettings(); close(); render(); toast('Settings saved');
       };
     }
@@ -2310,4 +2314,22 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   });
 }
 
-loadAll().then(render).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
+/* ================= Screen zoom lock =================
+   On (default): pinch and double-tap don't zoom the screen. Off: normal iPhone zooming.
+   The built-in camera's own pinch-to-zoom is separate and always works. */
+function zoomLocked() { return document.documentElement.classList.contains('zoom-locked'); }
+function applyZoomLock(on = S.settings.lockZoom !== false) {
+  document.documentElement.classList.toggle('zoom-locked', on);
+  const m = document.querySelector('meta[name="viewport"]');
+  // maximum-scale=1 also snaps the screen back if it was zoomed when the lock is switched on
+  if (m) m.setAttribute('content', on
+    ? 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover'
+    : 'width=device-width, initial-scale=1, viewport-fit=cover');
+}
+const outsideCamera = e => !(e.target && e.target.closest && e.target.closest('.cam'));
+// iOS ignores user-scalable=no for pinch, so block the pinch gesture itself while locked
+['gesturestart', 'gesturechange'].forEach(t => document.addEventListener(t, e => { if (zoomLocked() && outsideCamera(e)) e.preventDefault(); }, { passive: false }));
+document.addEventListener('touchmove', e => { if (zoomLocked() && e.touches && e.touches.length > 1 && outsideCamera(e)) e.preventDefault(); }, { passive: false });
+applyZoomLock(true);   // locked from the first moment; the saved choice is applied once settings load
+
+loadAll().then(() => { applyZoomLock(); render(); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
