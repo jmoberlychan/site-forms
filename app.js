@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.7.3';
+const APP_VERSION = '1.7.4';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -2685,21 +2685,64 @@ function shareStep(steps) {
     const finish = async how => {
       if (s.photos.length) {
         // Only "Yes" marks the photos exported (iOS can report success even when nothing was saved).
-        const yes = await new Promise(res => openSheet({
-          title: 'Did it save?', modal: true,
-          body: how === 'dl'
-            ? `<p>Did you save <b>${esc(file.name)}</b> (${mb(file.size)}) to Files or OneDrive from the preview?</p><p class="note">If you closed the preview without saving, tap <b>Not sure</b>. Photos are only marked exported if you tap Yes; otherwise they stay unexported and go into your next export.</p>`
-            : `<p>Check that <b>${esc(file.name)}</b> arrived where you sent it.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and go into your next export.</p>`,
-          foot: `<button class="btn ghost" id="ds-no">Not sure</button><button class="btn" id="ds-yes">Yes, it saved</button>`,
-          mount(e2, c2) { $('#ds-yes', e2).onclick = () => { c2(); res(true); }; $('#ds-no', e2).onclick = () => { c2(); res(false); }; }
-        }));
+        // After Download, iOS copies the file before its preview appears (about 10 s per GB), so the answer
+        // buttons stay locked until the app has gone behind the preview and come back, or a size-based wait has passed.
+        const yes = await new Promise(res => {
+          let armed = false, open = false, timer = null, waitEnd = 0, cleanup = () => {};
+          const waitFor = () => Math.min(240, Math.round(10 + 10 * file.size / 1073741824));
+          openSheet({
+            title: how === 'dl' ? 'Wait for the preview…' : 'Did it save?', modal: true,
+            body: '<div id="ds-body"></div>',
+            foot: `<button class="btn ghost" id="ds-no">Not sure</button><button class="btn" id="ds-yes">Yes, it saved</button>`,
+            onClose() { cleanup(); },
+            mount(e2, c2) {
+              const body = $('#ds-body', e2), h2 = $('h2', e2), by = $('#ds-yes', e2), bn = $('#ds-no', e2);
+              $('.sheet-head .close', e2).hidden = true;   // answer with the buttons only (Done would skip ahead mid-download)
+              const ask = () => {
+                open = true; clearInterval(timer); h2.textContent = 'Did it save?'; by.disabled = bn.disabled = false;
+                body.innerHTML = how === 'dl'
+                  ? `<p>Did you save <b>${esc(file.name)}</b> (${mb(file.size)}) to Files or OneDrive from the preview?</p>
+                     <p class="note">If the preview never appeared, or you closed it without saving, tap <b>Download again</b> or <b>Not sure</b>. Photos are only marked exported if you tap Yes; otherwise they stay unexported and go into your next export.</p>
+                     <button class="btn ghost" id="ds-again" style="width:100%">Download again</button>`
+                  : `<p>Check that <b>${esc(file.name)}</b> arrived where you sent it.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and go into your next export.</p>`;
+                const ag = $('#ds-again', e2); if (ag) ag.onclick = () => { download(); wait(); };
+              };
+              const wait = () => {
+                open = false; armed = false; by.disabled = bn.disabled = true; h2.textContent = 'Wait for the preview…';
+                waitEnd = Date.now() + waitFor() * 1000;
+                const tick = () => {
+                  const left = Math.max(0, Math.ceil((waitEnd - Date.now()) / 1000));
+                  body.innerHTML = `<p>The iPhone is getting <b>${esc(file.name)}</b> (${mb(file.size)}) ready. Its preview appears in up to <b>${left} s</b>.</p>
+                    <ol class="steps"><li>Wait for the preview. Don’t tap anything here.</li><li>Tap the <b>share button</b> ${SHARE_ICON} at the bottom left of the preview.</li><li>Choose <b>Save to Files</b> (or <b>OneDrive</b>).</li><li>Tap <b>✕</b> at the top left to come back.</li></ol>`;
+                  if (!left) ask();
+                };
+                clearInterval(timer); tick(); timer = setInterval(tick, 1000);
+              };
+              // the preview covering the app shows up as the page losing focus / being hidden; coming back = preview closed
+              // (away less than 3 s, e.g. a quick iOS prompt, doesn't count as the preview)
+              let awayAt = 0;
+              const away = () => { if (!open && !armed) { armed = true; awayAt = Date.now(); } };
+              const back = () => { if (!armed || document.hidden || open) return; if (Date.now() - awayAt < 3000) { armed = false; return; } setTimeout(ask, 400); };
+              const vis = () => { if (document.hidden) away(); else back(); };
+              document.addEventListener('visibilitychange', vis); window.addEventListener('blur', away); window.addEventListener('focus', back); window.addEventListener('pagehide', away); window.addEventListener('pageshow', back);
+              cleanup = () => { clearInterval(timer); document.removeEventListener('visibilitychange', vis); window.removeEventListener('blur', away); window.removeEventListener('focus', back); window.removeEventListener('pagehide', away); window.removeEventListener('pageshow', back); };
+              by.onclick = () => { if (by.disabled) return; c2(); res(true); };
+              bn.onclick = () => { if (bn.disabled) return; c2(); res(false); };
+              if (how === 'dl') wait(); else ask();
+            }
+          });
+        });
         if (yes) {
           const now = Date.now();
           for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
         } else toast('Not marked exported');
-      } else if (how === 'dl') toast('Saved to Files › Downloads');
-      if (url) { const u = url; setTimeout(() => URL.revokeObjectURL(u), 120000); url = null; }
+      } else if (how === 'dl') toast('Save it from the preview: share button → Save to Files');
+      if (url) { const u = url; setTimeout(() => URL.revokeObjectURL(u), 10 * 60000); url = null; }
       i++; next();
+    };
+    const download = () => {
+      if (!url) url = URL.createObjectURL(file);
+      const a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
     };
     openSheet({
       title: steps.length > 1 ? `Ready: ${s.label}` : 'Export ready',
@@ -2715,8 +2758,7 @@ function shareStep(steps) {
       onClose() { if (url) { URL.revokeObjectURL(url); url = null; } },
       mount(el, close) {
         $('#sv', el).onclick = () => {
-          url = URL.createObjectURL(file);
-          const a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+          download();
           const u = url; url = null; close(); url = u;     // keep the link alive while the download runs
           finish('dl');
         };

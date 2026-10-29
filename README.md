@@ -46,10 +46,11 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
    - **Spreadsheet:** named `<Project#> <YYYY-MM-DD> <Initials> Defects.xlsx`, for example `267180.00 2026-10-29 JJM Defects.xlsx`. Later exports the same day have the same name; the PC combine tool keeps only the newest one for each inspector.
    - **Combining on the PC:** use the combine tool (below) rather than unzipping by hand.
    - **Saving the ZIP:** when an export is ready:
-     1. Tap **Download**. The iPhone shows a preview of the ZIP.
+     1. Tap **Download**. The iPhone copies the file, then shows a preview of the ZIP. For big ZIPs this takes a while (about 10 seconds per GB; 30–45 seconds for 5 GB). Meanwhile the app shows **Wait for the preview…** with a countdown, and its buttons are locked so nothing moves on early.
      2. Tap the **share button** (the square with an arrow) at the bottom left of the preview.
      3. Choose **Save to Files** (or **OneDrive**) and pick the folder.
      4. Tap **✕** at the top left to come back to the app.
+     5. Answer **Did it save?** It unlocks when you come back from the preview (or when the countdown ends). If the preview never appeared, tap **Download again**. The next part only starts after you answer.
 
      This works at any size. In a Home Screen app, iOS always shows this preview instead of saving straight to Downloads (Apple treats it as intended behaviour), so the share-button step can't be skipped. **Share…** opens the share sheet directly, but only for files up to 400 MB: the share sheet loads the whole file into memory, and bigger files make the app close.
    - **ZIP names:** `<Project#> <YYYY-MM-DD> <Initials> <Export|Sorted|Unsorted|Photos> <HHMM>.zip`, plus `part 1 of 3` when an export is split, for example `267180.00 2026-10-29 JJM Export 1215 part 1 of 3.zip`.
@@ -120,7 +121,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
 
 To go back to a version, upload **all 10 files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 
