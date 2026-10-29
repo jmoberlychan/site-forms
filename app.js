@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.4.4';
+const APP_VERSION = '1.4.5';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -581,13 +581,16 @@ function lensBase() { return lensFactor(lensById(CAM.lensId)); }
 function lensOfKind(k) { return CAM.lenses.find(l => l.kind === k); }
 function digitalAllowed() { return CAM.mode === 'photo'; } // a crop can't be applied to a recording, so video zoom moves between lenses only
 // Overall zoom range across all lenses (0.5 with an ultra-wide; up to 10× digital in photo mode).
+const MAX_ZOOM = 40;
+// Highest zoom iOS itself provides (beyond it, photos use digital zoom up to 40×).
+function nativeTop() { return !CAM.native ? lensBase() : onVirtual() ? CAM.native.max / zMul() : lensBase() * CAM.native.max; }
 function zoomLimits() {
-  if (onVirtual()) return { min: CAM.native.min / zMul(), max: Math.max(1, Math.min(50, CAM.native.max / zMul())) };
+  if (onVirtual()) return { min: CAM.native.min / zMul(), max: digitalAllowed() ? MAX_ZOOM : Math.max(1, Math.min(MAX_ZOOM, nativeTop())) };
   const ultra = lensOfKind('ultra'), tele = lensOfKind('tele');
   const min = ultra ? 0.5 : lensBase();
   let max;
-  if (CAM.native) max = Math.min(50, lensBase() * CAM.native.max);
-  else if (digitalAllowed()) max = Math.max(10, tele ? teleFactor() * 2 : 0);
+  if (digitalAllowed()) max = MAX_ZOOM;
+  else if (CAM.native) max = Math.min(MAX_ZOOM, nativeTop());
   else max = tele ? teleFactor() : (CAM.lenses.length ? 1 : lensBase());
   return { min, max: Math.max(min, max) };
 }
@@ -664,6 +667,7 @@ function openCamera() {
   document.addEventListener('batchchange', camUpdate);
   document.addEventListener('visibilitychange', camVisibility);
   if (window.ResizeObserver) { CAM.ro = new ResizeObserver(() => { fitViewfinder(); centerModes(); }); CAM.ro.observe($('.cam-stage', el)); }
+  camRotInit();
   camUpdate(); requestAnimationFrame(centerModes); startStream();
 }
 function showFreeze() {
@@ -790,11 +794,16 @@ function readCaps() {
 function fitViewfinder() {
   if (!CAM.el) return;
   const v = $('.cam-view', CAM.el), stage = $('.cam-stage', CAM.el), vf = $('.cam-vf', CAM.el);
-  const vw = v.videoWidth || 3, vh = v.videoHeight || 4;
+  let vw = v.videoWidth || 3, vh = v.videoHeight || 4;
+  if (CAM.pageAngle) [vw, vh] = [vh, vw];                         // page rotated: the landscape feed is shown turned back
   const W = stage.clientWidth, H = stage.clientHeight; if (!W || !H) return;
   const ar = vw / vh; let w = W, h = W / ar;
   if (h > H) { h = H; w = H * ar; }
   vf.style.width = Math.round(w) + 'px'; vf.style.height = Math.round(h) + 'px';
+  // when the page is rotated the <video> itself is turned 90°, so give it the swapped size
+  if (CAM.pageAngle) { v.style.width = Math.round(h) + 'px'; v.style.height = Math.round(w) + 'px'; v.style.left = Math.round((w - h) / 2) + 'px'; v.style.top = Math.round((h - w) / 2) + 'px'; }
+  else { v.style.width = v.style.height = v.style.left = v.style.top = ''; }
+  const fz = $('.cam-freeze', CAM.el); if (fz) ['width', 'height', 'left', 'top'].forEach(p => fz.style[p] = v.style[p]);
 }
 function centerModes() {
   if (!CAM.el) return;
@@ -802,6 +811,76 @@ function centerModes() {
   if (!sel || !trk.offsetParent) return;                       // hidden: measure later
   trk.style.transform = `translateX(${-(sel.offsetLeft + sel.offsetWidth / 2)}px)`;
 }
+
+
+/* ---------- rotation: like the iPhone Camera, the layout stays put and the controls turn upright ----------
+   CAM.rot = how far to turn the controls (0, 90 or -90). It comes from the motion sensor when the screen is
+   locked in portrait, or from the page itself when iOS rotates it (rotation lock off). */
+function camRotInit() {
+  CAM.rot = 0; CAM.pageAngle = 0;
+  const askMotion = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
+  if (askMotion && !CAM.motionOK) {
+    // must be asked straight from the tap that opened the camera
+    DeviceMotionEvent.requestPermission().then(r => { CAM.motionOK = r === 'granted'; camLog('motion: ' + r); }).catch(e => camLog('motion: ' + e.name));
+  }
+  startMotion();   // listens either way; events only arrive once iOS allows motion access
+  window.addEventListener('resize', camPageLayout); window.addEventListener('orientationchange', camPageLayout);
+  camPageLayout();
+}
+function startMotion() { if (!CAM.motionOn) { CAM.motionOn = true; window.addEventListener('devicemotion', onMotion); } }
+function stopMotion() {
+  window.removeEventListener('devicemotion', onMotion); CAM.motionOn = false;
+  window.removeEventListener('resize', camPageLayout); window.removeEventListener('orientationchange', camPageLayout);
+}
+function onMotion(e) {
+  if (!CAM.el || CAM.pageAngle) return;                       // page already rotated by iOS: use that instead
+  const g = e.accelerationIncludingGravity; if (!g || g.x == null) return;
+  const x = g.x, y = g.y, z = g.z || 0;
+  if (Math.abs(z) > 8.3) return;                               // lying flat: keep the last orientation
+  let want = CAM.rot;
+  if (Math.abs(x) > 5.5 && Math.abs(x) > Math.abs(y) * 1.4) want = x < 0 ? 90 : -90;  // iOS: gravity along −x = top of phone to the left
+  else if (y < -5.5 && Math.abs(y) > Math.abs(x) * 1.4) want = 0;
+  if (want === CAM.rot) { clearTimeout(CAM.rotT); CAM.rotWant = null; return; }
+  if (CAM.rotWant !== want) { CAM.rotWant = want; clearTimeout(CAM.rotT); CAM.rotT = setTimeout(() => setRot(want), 220); }
+}
+function setRot(r) {
+  CAM.rotWant = null; if (!CAM.el || r === CAM.rot) return;
+  CAM.rot = r; CAM.el.style.setProperty('--rot', r + 'deg');
+  CAM.el.classList.toggle('rot-l', r === 90); CAM.el.classList.toggle('rot-r', r === -90);
+}
+// When iOS rotates the whole page, turn the camera screen back so it looks exactly as before,
+// keep the picture upright, and turn the controls — the same result as with rotation lock on.
+function camPageLayout() {
+  if (!CAM.el) return;
+  const land = innerWidth > innerHeight;
+  const o = typeof window.orientation === 'number' ? window.orientation : (screen.orientation ? (screen.orientation.angle === 270 ? -90 : screen.orientation.angle) : 90);
+  const a = land ? (o === -90 ? -90 : 90) : 0;
+  CAM.pageAngle = a;
+  const el = CAM.el;
+  if (a) {
+    el.style.width = innerHeight + 'px'; el.style.height = innerWidth + 'px';
+    el.style.left = '50%'; el.style.top = '50%'; el.style.right = 'auto'; el.style.bottom = 'auto';
+    el.style.transform = `translate(-50%, -50%) rotate(${-a}deg)`;
+  } else {
+    el.style.width = el.style.height = el.style.left = el.style.top = el.style.right = el.style.bottom = el.style.transform = '';
+  }
+  el.classList.toggle('page-rot', !!a);
+  setRot(a); setViewTransform(); fitViewfinder();
+}
+// How much to turn a captured frame so it comes out upright. Not needed when iOS rotated the page
+// (the camera feed is already landscape then).
+function captureRotation() { return CAM.pageAngle ? 0 : -(CAM.rot || 0); }
+// Video held sideways (with rotation lock on): draw each frame turned onto a canvas and record that.
+function rotatedVideoTrack(r) {
+  const v = $('.cam-view', CAM.el), c = document.createElement('canvas');
+  if (!c.captureStream || !v.videoWidth) return null;
+  const w = v.videoWidth, h = v.videoHeight; c.width = h; c.height = w;
+  const g = c.getContext('2d');
+  const draw = () => { g.save(); g.translate(h / 2, w / 2); g.rotate(r * Math.PI / 180); g.drawImage(v, -w / 2, -h / 2, w, h); g.restore(); CAM.rotRaf = requestAnimationFrame(draw); };
+  draw();
+  try { const st = c.captureStream(30); CAM.rotTrack = st.getVideoTracks()[0]; return CAM.rotTrack; } catch (_) { cancelAnimationFrame(CAM.rotRaf); return null; }
+}
+function stopRotatedTrack() { cancelAnimationFrame(CAM.rotRaf); if (CAM.rotTrack) { CAM.rotTrack.stop(); CAM.rotTrack = null; } }
 
 /* ---------- zoom wheel (like the iPhone's dial) ---------- */
 const DIAL = { degPerOctave: 30, R: 0, H: 84 };
@@ -858,15 +937,20 @@ function applyZoom() {
   const rel = Math.max(1, CAM.zoom / base);
   const v = $('.cam-view', CAM.el);
   if (CAM.native) {
-    v.style.transform = '';
     const nz = onVirtual() ? CAM.zoom * zMul() : rel;
     CAM.track && CAM.track.applyConstraints({ advanced: [{ zoom: Math.min(CAM.native.max, Math.max(CAM.native.min, nz)) }] }).catch(() => {});
-  } else {
-    v.style.transform = digitalAllowed() && rel > 1.001 ? `scale(${rel})` : '';
   }
+  setViewTransform();
   renderZoomRow(); updateDial();
 }
-function digitalFactor() { return !CAM.native && digitalAllowed() ? Math.max(1, CAM.zoom / lensBase()) : 1; }
+function digitalFactor() { return digitalAllowed() ? Math.max(1, CAM.zoom / nativeTop()) : 1; }
+// The video element's transform: digital zoom, plus turning the picture back upright if iOS rotated the page.
+function setViewTransform() {
+  if (!CAM.el) return;
+  const d = digitalFactor(), a = CAM.pageAngle || 0;
+  const t = (a ? `rotate(${a}deg) ` : '') + (d > 1.001 ? `scale(${d})` : '');
+  $('.cam-view', CAM.el).style.transform = t; $('.cam-freeze', CAM.el).style.transform = t;
+}
 function zoomPresets() {
   const ultra = lensOfKind('ultra') || (onVirtual() && zoomLimits().min <= 0.51), tele = lensOfKind('tele') || (onVirtual() && /triple|dual camera/i.test(CAM.virt.name));
   const P = [];
@@ -911,7 +995,27 @@ function endZoomGesture() {
   }
   setZoom(CAM.zoom); hideDialSoon();
 }
-function setPinchZoom(z) { setZoom(z, { gesture: true }); showDial(); }
+function setPinchZoom(z) {
+  // Stick at each lens stop for a short stretch of finger travel, like the iPhone's zoom dial.
+  let stop = null;
+  for (const p of zoomPresets()) if (Math.abs(Math.log2(z / p.z)) < 0.14) { z = p.z; stop = p.z; break; }
+  if (stop !== null && CAM._lastStop !== stop) haptic();
+  CAM._lastStop = stop;
+  setZoom(z, { gesture: true }); showDial();
+}
+// A light haptic tick. iOS 18+ gives one when a switch toggles; older iOS simply does nothing.
+function haptic() {
+  try {
+    if (!CAM.hapt) {
+      const l = document.createElement('label'); l.setAttribute('aria-hidden', 'true');
+      l.style.cssText = 'position:fixed;left:-200px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
+      const i = document.createElement('input'); i.type = 'checkbox'; i.setAttribute('switch', ''); i.tabIndex = -1;
+      l.appendChild(i); document.body.appendChild(l); CAM.hapt = l;
+    }
+    CAM.hapt.click();
+  } catch (_) {}
+  try { if (navigator.vibrate) navigator.vibrate(8); } catch (_) {}
+}
 // Turning the wheel: drag left to zoom in. Works on the zoom buttons and anywhere on the wheel itself.
 function bindWheelDrag(el, opts = {}) {
   let sx = null, z0 = 1, moved = false, pid = null;
@@ -1102,8 +1206,11 @@ async function snapPhoto() {
     const d = digitalFactor();
     const sw = Math.round(v.videoWidth / d), sh = Math.round(v.videoHeight / d);
     const sx = Math.round((v.videoWidth - sw) / 2), sy = Math.round((v.videoHeight - sh) / 2);
-    const c = document.createElement('canvas'); c.width = sw; c.height = sh;
-    c.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, sw, sh);   // digital zoom = centre crop, no upscaling
+    const r = captureRotation();                                      // phone held sideways → landscape photo
+    const c = document.createElement('canvas'); c.width = r ? sh : sw; c.height = r ? sw : sh;
+    const g = c.getContext('2d');
+    g.translate(c.width / 2, c.height / 2); g.rotate(r * Math.PI / 180);
+    g.drawImage(v, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);          // digital zoom = centre crop, no upscaling
     const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
     await camSave(new File([blob], 'capture.jpg', { type: 'image/jpeg' }));
   } finally { CAM.busy = false; }
@@ -1113,13 +1220,20 @@ function toggleRecord() {
   if (!CAM.stream) return;
   const mime = pickRecMime();
   let rec;
-  const recStream = new MediaStream([CAM.track, ...(CAM.audio && CAM.audio.readyState === 'live' ? [CAM.audio] : [])]);
+  const audioTr = CAM.audio && CAM.audio.readyState === 'live' ? [CAM.audio] : [];
+  let recStream = new MediaStream([CAM.track, ...audioTr]);
+  const r = captureRotation();
+  if (r) {
+    const turned = rotatedVideoTrack(r);
+    if (turned) recStream = new MediaStream([turned, ...audioTr]);
+    else toast('This iPhone can’t turn sideways video — it will be saved upright');
+  }
   try { rec = new MediaRecorder(recStream, { mimeType: mime, videoBitsPerSecond: (VQ[S.settings.vidQ] || VQ['1080']).bps }); }
   catch (_) { try { rec = new MediaRecorder(recStream); } catch (e) { toast('Can’t record video here'); return; } }
   CAM.chunks = []; CAM.rec = rec; CAM.recStart = Date.now(); CAM.optsOpen = false;
   rec.ondataavailable = e => { if (e.data && e.data.size) CAM.chunks.push(e.data); };
   rec.onstop = async () => {
-    clearInterval(CAM.recTimer); CAM.rec = null;
+    clearInterval(CAM.recTimer); CAM.rec = null; stopRotatedTrack();
     const type = (rec.mimeType || mime || 'video/mp4').split(';')[0];
     const blob = new Blob(CAM.chunks, { type }); CAM.chunks = [];
     if (CAM.el) camUpdate();
@@ -1152,7 +1266,7 @@ function stopTracks() {
 function closeCamera(finish) {
   return new Promise(res => {
     const done = () => {
-      stopTracks(); dropAudio(); clearInterval(CAM.recTimer);
+      stopTracks(); dropAudio(); stopRotatedTrack(); stopMotion(); clearInterval(CAM.recTimer);
       if (CAM.ro) { CAM.ro.disconnect(); CAM.ro = null; }
       if (CAM.el) { CAM.el.remove(); CAM.el = null; }
       document.documentElement.classList.remove('cam-open');

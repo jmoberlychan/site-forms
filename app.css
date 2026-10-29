@@ -386,3 +386,25 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 .cam-dial { height: 128px; }
 .cam-dial-svg { bottom: 48px; }
 .cam-dial-svg text { font-size: 9.5px; }
+
+/* ---------- v1.4.5 rotation: controls turn upright, layout stays put (like the iPhone Camera) ---------- */
+.cam { --rot: 0deg; }
+.cam-flash-btn svg, .cam-chev svg, .cam-done, .cam-zoomrow button, .cam-last, .cam-batch, .cam-timer, .cam-lock, .cam-msg > * {
+  transition: transform .3s ease;
+}
+.cam-flash-btn svg, .cam-chev svg, .cam-done, .cam-zoomrow button, .cam-last, .cam-batch > span, .cam-timer { transform: rotate(var(--rot)); }
+.cam-batch { transition: none; }
+.cam-batch > span { transition: transform .3s ease; display: block; }
+.cam-batch { display: grid; place-items: center; }
+.cam-batch .n, .cam-batch .of { grid-area: 1 / 1; }
+.cam-batch .n { margin-top: -8px; } .cam-batch .of { margin-top: 18px; }
+.cam.rot-l .cam-batch .n, .cam.rot-r .cam-batch .n, .cam.rot-l .cam-batch .of, .cam.rot-r .cam-batch .of { margin-top: 0; }
+.cam.rot-l .cam-batch .of, .cam.rot-r .cam-batch .of { display: none; }
+.cam-ctx { transition: transform .3s ease, top .3s ease, left .3s ease, right .3s ease; }
+.cam.rot-l .cam-ctx { top: 50%; left: auto; right: 22px; transform: translate(50%, -50%) rotate(90deg); }
+.cam.rot-r .cam-ctx { top: 50%; left: 22px; right: auto; transform: translate(-50%, -50%) rotate(-90deg); }
+.cam.rot-l .cam-lock { top: 50%; left: 56px; transform: translate(-50%, -50%) rotate(90deg); }
+.cam.rot-r .cam-lock { top: 50%; left: auto; right: 56px; transform: translate(50%, -50%) rotate(-90deg); }
+@media (prefers-reduced-motion: reduce) { .cam * { transition: none !important; } }
+.cam.page-rot { inset: auto; }
+.cam-view, .cam-freeze { transform-origin: 50% 50%; }
