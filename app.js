@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -583,16 +583,21 @@ function fmtZoom(z) { const r = Math.round(z * 10) / 10; return (r < 1 ? String(
 function openCamera() {
   if (CAM.el) return;
   if (CAM.mode === 'video' && !pickRecMime()) CAM.mode = 'photo';
-  CAM.optsOpen = false; CAM.focusLocked = false;
+  CAM.optsOpen = false; CAM.focusLocked = false; CAM.log = []; CAM.err = '';
   const el = document.createElement('div'); el.className = 'cam'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Camera');
   el.innerHTML = `
     <div class="cam-top">
-      <button class="cam-ico cam-flash-btn" data-cam="torch" aria-label="Flashlight" aria-pressed="false" hidden>${ICON.flashOff}</button>
+      <button class="cam-ico cam-flash-btn" data-cam="torch" aria-label="Flash" aria-pressed="false">${ICON.flashOff}</button>
       <div class="cam-top-mid">
-        <button class="cam-chev" data-cam="opts" aria-label="Camera options" aria-expanded="false">${ICON.chevUp}</button>
+        <button class="cam-chev" data-cam="opts" aria-label="Camera options" aria-expanded="false">${ICON.chevDown}</button>
         <div class="cam-timer" hidden>00:00:00</div>
       </div>
       <button class="cam-done" data-cam="done">Done</button>
+    </div>
+    <div class="cam-opts" hidden>
+      ${stepperHTML()}
+      <div class="cam-opts-row"><button class="cam-link" data-cam="restart">Restart camera</button><button class="cam-link" data-cam="native">Use iPhone camera</button></div>
+      <div class="cam-diag"></div>
     </div>
     <div class="cam-stage">
       <div class="cam-vf">
@@ -601,6 +606,7 @@ function openCamera() {
         <div class="cam-ctx"></div>
         <div class="cam-lock" hidden>AE/AF LOCK</div>
         <div class="cam-focus" hidden></div>
+        <div class="cam-dial" hidden aria-hidden="true"><div class="cam-dial-val"></div><svg class="cam-dial-svg"></svg></div>
         <div class="cam-zoomrow" role="group" aria-label="Zoom"></div>
         <div class="cam-msg" hidden></div>
       </div>
@@ -612,16 +618,13 @@ function openCamera() {
           <button role="radio" data-cam="mode" data-v="photo">PHOTO</button>
         </div>
       </div>
-      <div class="cam-opts" hidden>
-        ${stepperHTML()}
-        <div class="cam-opts-row"><span class="cam-res"></span><button class="cam-link" data-cam="native">Use iPhone camera</button></div>
-      </div>
       <div class="cam-row">
         <button class="cam-last" data-cam="last" aria-label="Captured in this batch"></button>
         <button class="cam-shutter" data-cam="shoot" aria-label="Take photo"><span></span></button>
         <button class="cam-batch" data-cam="opts" aria-label="Batch progress"><span class="n">0</span><span class="of">of 1</span></button>
       </div>
     </div>`;
+  const v = el.querySelector('.cam-view'); v.muted = true; v.defaultMuted = true; v.playsInline = true; v.setAttribute('muted', ''); v.setAttribute('playsinline', '');
   document.body.appendChild(el); CAM.el = el;
   document.documentElement.classList.add('cam-open');
   el.addEventListener('click', onCamClick);
@@ -629,66 +632,107 @@ function openCamera() {
   bindZoomRowDrag($('.cam-zoomrow', el));
   document.addEventListener('batchchange', camUpdate);
   document.addEventListener('visibilitychange', camVisibility);
-  if (window.ResizeObserver) { CAM.ro = new ResizeObserver(fitViewfinder); CAM.ro.observe($('.cam-stage', el)); }
-  camUpdate(); startStream();
+  if (window.ResizeObserver) { CAM.ro = new ResizeObserver(() => { fitViewfinder(); centerModes(); }); CAM.ro.observe($('.cam-stage', el)); }
+  camUpdate(); requestAnimationFrame(centerModes); startStream();
 }
-
+function camLog(s) { CAM.log.push(s); if (CAM.log.length > 12) CAM.log.shift(); if (CAM.el && CAM.optsOpen) renderDiag(); }
+function renderDiag() {
+  const d = CAM.el && $('.cam-diag', CAM.el); if (!d) return;
+  const c = CAM.caps || {};
+  d.innerHTML = `<b>Camera details</b><br>${esc(CAM.label || 'not started')}${CAM.res ? ' · ' + esc(CAM.res) : ''}<br>
+    Flash: ${c.torch ? 'available' : 'not offered by iOS on this lens'} · Optical zoom control: ${CAM.native ? 'yes' : 'no (lens buttons + digital)'}<br>
+    Lenses found: ${CAM.lenses.length ? esc(CAM.lenses.map(l => l.label).join(', ')) : 'one'}${CAM.err ? `<br><span class="cam-err">Last error: ${esc(CAM.err)}</span>` : ''}
+    <br><span class="cam-log">${esc(CAM.log.join(' › '))}</span>`;
+}
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error(what + ' timed out'), { name: 'TimeoutError' })), ms))]);
+// Open the camera, trying progressively simpler requests so one picky setting can't stop it starting.
 async function startStream() {
-  if (!CAM.el || CAM.starting) return;
-  CAM.starting = true; stopTracks();
+  if (!CAM.el) return;
+  if (CAM.starting) { CAM.again = true; return; }
+  CAM.starting = true; CAM.err = '';
+  const v = $('.cam-view', CAM.el);
+  const hadStream = !!CAM.stream;
+  stopTracks(); v.pause(); v.srcObject = null;
+  if (hadStream) await new Promise(r => setTimeout(r, 250));   // let iOS release the previous lens before asking again
+  if (!CAM.el) { CAM.starting = false; return; }
   const q = VQ[S.settings.vidQ] || VQ['1080'];
-  const video = CAM.mode === 'video'
-    ? { width: { ideal: q.w }, height: { ideal: q.h }, frameRate: { ideal: 30 } }
-    : { width: { ideal: 4096 }, height: { ideal: 3072 } };          // 4:3 like the iPhone photo mode
-  if (CAM.lensId) video.deviceId = { exact: CAM.lensId }; else video.facingMode = { ideal: 'environment' };
+  const size = CAM.mode === 'video' ? { width: { ideal: q.w }, height: { ideal: q.h }, frameRate: { ideal: 30 } } : { width: { ideal: 4032 }, height: { ideal: 3024 } };
+  const where = CAM.lensId ? { deviceId: { exact: CAM.lensId } } : { facingMode: { ideal: 'environment' } };
+  const audio = CAM.mode === 'video';
+  const tries = [
+    { video: { ...where, ...size }, audio },
+    { video: { ...where }, audio },
+    { video: { facingMode: 'environment' }, audio },
+    { video: true, audio: false },
+  ];
   camMsg('Starting camera…');
-  try {
-    let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ video, audio: CAM.mode === 'video' }); }
+  let stream = null, lastErr = null;
+  for (let i = 0; i < tries.length && !stream; i++) {
+    try { camLog('request ' + (i + 1)); stream = await withTimeout(navigator.mediaDevices.getUserMedia(tries[i]), 12000, 'Camera request'); }
     catch (e) {
-      if (CAM.mode === 'video' && /NotAllowed|NotFound/.test(e.name)) { stream = await navigator.mediaDevices.getUserMedia({ video, audio: false }); toast('Recording without sound — microphone not allowed'); }
-      else throw e;
+      lastErr = e; camLog((e.name || 'Error') + (e.message ? ': ' + e.message : ''));
+      if (e.name === 'NotAllowedError') break;          // permission refused: retrying won't help
+      if (i === 0 && CAM.lensId && /Overconstrained|NotFound/.test(e.name)) CAM.lensId = null;
     }
-    if (!CAM.el) { stream.getTracks().forEach(t => t.stop()); return; }
-    CAM.stream = stream; CAM.track = stream.getVideoTracks()[0];
-    const v = $('.cam-view', CAM.el); v.srcObject = stream; await v.play().catch(() => {});
-    await new Promise(r => v.videoWidth ? r() : (v.onloadedmetadata = () => r()));
-    camMsg(null);
-    if (!CAM.lenses.length) await findLenses();
-    readCaps();
-    if (CAM.torch) setTorch(true, true);
-    const { min, max } = zoomLimits();
-    CAM.zoom = Math.min(max, Math.max(min, CAM.zoom < lensBase() ? lensBase() : CAM.zoom));
-    applyZoom();
-    fitViewfinder(); camUpdate();
-  } catch (e) {
-    const blocked = e && e.name === 'NotAllowedError';
-    camMsg(blocked
+  }
+  if (!CAM.el) { if (stream) stream.getTracks().forEach(t => t.stop()); CAM.starting = false; return; }
+  if (!stream) {
+    CAM.starting = false; CAM.err = lastErr ? (lastErr.name + (lastErr.message ? ': ' + lastErr.message : '')) : 'unknown';
+    camMsg(lastErr && lastErr.name === 'NotAllowedError'
       ? 'Camera access is blocked for this app.<br>On iPhone: Settings → Apps → Safari → Camera → Allow, then reopen the app.'
-      : 'The camera couldn’t start' + (e && e.message ? ': ' + esc(e.message) : '.'), true);
-  } finally { CAM.starting = false; }
+      : 'The camera couldn’t start.<br><small>' + esc(CAM.err) + '</small>', true);
+    renderDiag(); return;
+  }
+  if (audio && !stream.getAudioTracks().length) toast('Recording without sound — microphone not allowed');
+  CAM.stream = stream; CAM.track = stream.getVideoTracks()[0];
+  CAM.label = CAM.track.label || '';
+  camLog('got ' + (CAM.label || 'camera'));
+  CAM.track.addEventListener('ended', () => { camLog('track ended'); if (CAM.el && !document.hidden && !CAM.starting) startStream(); });
+  v.srcObject = stream;
+  const p = v.play(); if (p && p.catch) p.catch(e => camLog('play: ' + e.name));
+  // Wait for real frames, but never hang: after 4 s offer a tap-to-start (iOS sometimes wants a tap).
+  const ok = await new Promise(res => {
+    if (v.videoWidth && !v.paused) return res(true);
+    const done = r => { v.removeEventListener('playing', on); v.removeEventListener('loadeddata', on); clearTimeout(t); res(r); };
+    const on = () => { if (v.videoWidth) done(true); };
+    v.addEventListener('playing', on); v.addEventListener('loadeddata', on);
+    const t = setTimeout(() => done(!!v.videoWidth && !v.paused), 4000);
+  });
+  CAM.starting = false;
+  if (!CAM.el) return;
+  if (!ok) { camLog('waiting for tap'); camMsg('Tap to start the camera', false, true); }
+  else camMsg(null);
+  await findLenses();
+  readCaps();
+  if (CAM.torch) setTorch(true, true);
+  const { min, max } = zoomLimits();
+  CAM.zoom = Math.min(max, Math.max(min, CAM.zoom < lensBase() ? lensBase() : CAM.zoom));
+  applyZoom(); fitViewfinder(); camUpdate();
+  if (CAM.again) { CAM.again = false; startStream(); }
 }
 async function findLenses() {
   try {
-    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
-    const pick = (re, factor, label) => { const d = devs.find(x => re.test(x.label)); return d ? { id: d.deviceId, factor, label } : null; };
-    const L = [pick(/back.*ultra ?wide/i, 0.5, '.5'), pick(/^back camera$/i, 1, '1'), pick(/back.*telephoto/i, null, 'Tele')].filter(Boolean);
-    CAM.lenses = L.some(l => l.factor === 1) ? L : [];
-    if (CAM.lenses.length && !CAM.lensId) {
-      CAM.lensId = CAM.lenses.find(l => l.factor === 1).id;
-      // the first stream may have opened a different lens; reopen on the main (1×) lens
-      const cur = CAM.track && CAM.track.getSettings ? CAM.track.getSettings().deviceId : null;
-      if (cur && cur !== CAM.lensId) { CAM.starting = false; setTimeout(startStream, 0); }
+    if (!CAM.lenses.length) {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+      camLog(devs.length + ' cameras');
+      const pick = (re, factor, label) => { const d = devs.find(x => re.test(x.label)); return d ? { id: d.deviceId, factor, label, name: d.label } : null; };
+      const L = [pick(/back.*ultra ?wide/i, 0.5, '.5'), pick(/^back camera$/i, 1, '1'), pick(/back.*telephoto/i, null, 'Tele')].filter(Boolean);
+      CAM.lenses = L.some(l => l.factor === 1) ? L : [];
     }
-  } catch (_) { CAM.lenses = []; }
+    // Work out which lens is actually open (by id, then by name). Never force a restart just to find out.
+    const st = CAM.track && CAM.track.getSettings ? CAM.track.getSettings() : {};
+    const cur = CAM.lenses.find(l => l.id === st.deviceId) || CAM.lenses.find(l => l.name === CAM.label);
+    CAM.lensId = cur ? cur.id : null;
+  } catch (e) { camLog('lenses: ' + e.name); CAM.lenses = []; }
 }
 function readCaps() {
-  const caps = CAM.track && CAM.track.getCapabilities ? CAM.track.getCapabilities() : {};
+  let caps = {};
+  try { caps = CAM.track && CAM.track.getCapabilities ? CAM.track.getCapabilities() : {}; } catch (_) {}
   CAM.caps = caps;
   CAM.native = caps.zoom && caps.zoom.max > caps.zoom.min ? { min: caps.zoom.min, max: Math.min(caps.zoom.max, 15) } : null;
-  const tb = $('[data-cam="torch"]', CAM.el); tb.hidden = !caps.torch;
-  const st = CAM.track.getSettings ? CAM.track.getSettings() : {};
+  const st = CAM.track && CAM.track.getSettings ? CAM.track.getSettings() : {};
   CAM.res = st.width && st.height ? `${Math.max(st.width, st.height)}×${Math.min(st.width, st.height)}` : '';
+  camLog('ready' + (caps.torch ? ' · flash' : ''));
 }
 function fitViewfinder() {
   if (!CAM.el) return;
@@ -698,6 +742,57 @@ function fitViewfinder() {
   const ar = vw / vh; let w = W, h = W / ar;
   if (h > H) { h = H; w = H * ar; }
   vf.style.width = Math.round(w) + 'px'; vf.style.height = Math.round(h) + 'px';
+}
+function centerModes() {
+  if (!CAM.el) return;
+  const trk = $('.cam-modes-track', CAM.el), sel = trk.querySelector(`[data-v="${CAM.mode}"]`);
+  if (!sel || !trk.offsetParent) return;                       // hidden: measure later
+  trk.style.transform = `translateX(${-(sel.offsetLeft + sel.offsetWidth / 2)}px)`;
+}
+
+/* ---------- zoom wheel (like the iPhone's dial) ---------- */
+const DIAL = { degPerOctave: 34, R: 0 };
+function zAngle(z) { return Math.log2(z) * DIAL.degPerOctave; }
+function drawDial() {
+  const dial = $('.cam-dial', CAM.el), svg = $('.cam-dial-svg', CAM.el), vf = $('.cam-vf', CAM.el);
+  const W = vf.clientWidth || 360, H = 120, R = Math.max(260, W * 0.95), cx = W / 2, cy = 26 + R;
+  DIAL.R = R;
+  const { min, max } = zoomLimits();
+  const ticks = [];
+  const add = (from, to, step) => { for (let z = from; z <= to + 1e-9; z = Math.round((z + step) * 1000) / 1000) if (z >= min - 1e-9 && z <= max + 1e-9) ticks.push(z); };
+  add(0.5, 1, 0.05); add(1.1, 2, 0.1); add(2.2, 5, 0.2); add(5.5, 10, 0.5); add(11, 15, 1);
+  const majors = [0.5, 1, 2, 3, 5, 10, 15].filter(z => z >= min - 1e-9 && z <= max + 1e-9);
+  const pt = (deg, r) => { const a = deg * Math.PI / 180; return [cx + r * Math.sin(a), cy - r * Math.cos(a)]; };
+  let g = '';
+  for (const z of ticks) {
+    const major = majors.some(m => Math.abs(m - z) < 1e-6);
+    const [x1, y1] = pt(zAngle(z), R), [x2, y2] = pt(zAngle(z), R - (major ? 14 : 8));
+    g += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" class="${major ? 'mj' : 'mn'}"/>`;
+  }
+  for (const z of majors) {
+    const [x, y] = pt(zAngle(z), R - 30);
+    g += `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" transform="rotate(${zAngle(z).toFixed(2)} ${x.toFixed(1)} ${y.toFixed(1)})">${z < 1 ? '.5' : z + '×'}</text>`;
+  }
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.innerHTML = `<g class="cam-dial-g" style="transform-origin:${cx}px ${cy}px">${g}</g><path d="M${cx - 6} 6 L${cx + 6} 6 L${cx} 15 Z" class="ptr"/>`;
+  dial.dataset.key = `${W}|${min}|${max}`;
+}
+function showDial() {
+  if (!CAM.el) return;
+  const { min, max } = zoomLimits(); if (max - min < 0.05) return;
+  const dial = $('.cam-dial', CAM.el), key = `${$('.cam-vf', CAM.el).clientWidth}|${min}|${max}`;
+  if (dial.dataset.key !== key) drawDial();
+  clearTimeout(DIAL.hideT); dial.hidden = false; dial.classList.add('on'); CAM.el.classList.add('dialing');
+  updateDial();
+}
+function updateDial() {
+  const dial = CAM.el && $('.cam-dial', CAM.el); if (!dial || dial.hidden) return;
+  const g = dial.querySelector('.cam-dial-g'); if (g) g.style.transform = `rotate(${-zAngle(CAM.zoom)}deg)`;
+  $('.cam-dial-val', CAM.el).textContent = fmtZoom(CAM.zoom);
+}
+function hideDialSoon() {
+  clearTimeout(DIAL.hideT);
+  DIAL.hideT = setTimeout(() => { if (!CAM.el) return; const d = $('.cam-dial', CAM.el); d.classList.remove('on'); CAM.el.classList.remove('dialing'); setTimeout(() => { if (!d.classList.contains('on')) d.hidden = true; }, 200); }, 1100);
 }
 
 /* ---------- zoom ---------- */
@@ -713,7 +808,7 @@ function applyZoom() {
   } else {
     v.style.transform = digitalAllowed() && rel > 1.001 ? `scale(${rel})` : '';
   }
-  renderZoomRow();
+  renderZoomRow(); updateDial();
 }
 function digitalFactor() { return !CAM.native && digitalAllowed() ? Math.max(1, CAM.zoom / lensBase()) : 1; }
 function zoomPresets() {
@@ -763,7 +858,7 @@ function setPinchZoom(z) {
   const { max } = zoomLimits();
   const lo = lensBase();
   CAM.zoom = Math.min(max, Math.max(lo, z));
-  applyZoom();
+  applyZoom(); showDial();
 }
 function bindZoomRowDrag(row) {
   let sx = null, z0 = 1, moved = false;
@@ -771,13 +866,15 @@ function bindZoomRowDrag(row) {
   row.addEventListener('pointermove', e => {
     if (sx == null) return;
     const dx = e.clientX - sx; if (Math.abs(dx) < 8 && !moved) return;
-    if (!moved) { try { row.setPointerCapture(row._pid); } catch (_) {} }
+    if (!moved) { try { row.setPointerCapture(row._pid); } catch (_) {} showDial(); }
     moved = true; row.classList.add('dragging');
-    setPinchZoom(z0 * Math.pow(2, -dx / 110)); // drag left to zoom in, like the iPhone zoom dial
+    // turning the wheel: drag left to zoom in; one "octave" (×2) per arc of the wheel's tick spacing
+    const pxPerOctave = Math.max(90, (DIAL.R || 330) * DIAL.degPerOctave * Math.PI / 180);
+    setPinchZoom(z0 * Math.pow(2, -dx / pxPerOctave));
   });
   const end = e => {
     if (sx == null) return; sx = null; row.classList.remove('dragging');
-    if (moved) { e.preventDefault(); row._suppressClick = true; settleZoom(); setTimeout(() => row._suppressClick = false, 50); }
+    if (moved) { e.preventDefault(); row._suppressClick = true; settleZoom(); hideDialSoon(); setTimeout(() => row._suppressClick = false, 50); }
   };
   row.addEventListener('pointerup', end); row.addEventListener('pointercancel', end);
 }
@@ -803,7 +900,7 @@ function bindViewfinderGestures(vf) {
   const up = e => {
     if (!pts.has(e.pointerId)) return;
     const p = pts.get(e.pointerId); pts.delete(e.pointerId); clearTimeout(hold);
-    if (pinch) { if (pts.size < 2) { pinch = null; settleZoom(); } return; }
+    if (pinch) { if (pts.size < 2) { pinch = null; settleZoom(); hideDialSoon(); } return; }
     if (swipe && e.type === 'pointerup') {
       const dx = p.x - swipe.x, dy = p.y - swipe.y, dt = Date.now() - swipe.t;
       if (Math.abs(dx) > 50 && Math.abs(dy) < 60 && dt < 600 && !CAM.rec) switchMode(dx > 0 ? 'video' : 'photo');
@@ -858,15 +955,15 @@ function camUpdate() {
   CAM.el.classList.toggle('is-video', CAM.mode === 'video');
   CAM.el.classList.toggle('is-rec', !!CAM.rec);
   CAM.el.querySelectorAll('[data-cam="mode"]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === CAM.mode));
-  const trk = $('.cam-modes-track', CAM.el), sel = trk.querySelector(`[data-v="${CAM.mode}"]`);
-  trk.style.transform = `translateX(${-(sel.offsetLeft + sel.offsetWidth / 2)}px)`;
+  requestAnimationFrame(centerModes);
   $('[data-cam="shoot"]', CAM.el).setAttribute('aria-label', CAM.mode === 'video' ? (CAM.rec ? 'Stop recording' : 'Start recording') : 'Take photo');
   const tb = $('[data-cam="torch"]', CAM.el);
   tb.innerHTML = CAM.torch ? ICON.flashOn : ICON.flashOff; tb.setAttribute('aria-pressed', CAM.torch); tb.classList.toggle('on', CAM.torch);
-  $('.cam-res', CAM.el).textContent = CAM.res ? CAM.res + (CAM.mode === 'video' ? ' · ' + (VQ[S.settings.vidQ] || VQ['1080']).label : '') : '';
+  tb.classList.toggle('na', !!CAM.track && !(CAM.caps && CAM.caps.torch));
   const opts = $('.cam-opts', CAM.el), ch = $('.cam-chev', CAM.el);
-  opts.hidden = !CAM.optsOpen || !!CAM.rec; $('.cam-modes', CAM.el).hidden = CAM.optsOpen || !!CAM.rec;
-  ch.innerHTML = CAM.optsOpen ? ICON.chevDown : ICON.chevUp; ch.setAttribute('aria-expanded', CAM.optsOpen); ch.hidden = !!CAM.rec;
+  opts.hidden = !CAM.optsOpen || !!CAM.rec; $('.cam-modes', CAM.el).style.visibility = CAM.rec ? 'hidden' : '';
+  if (CAM.optsOpen) renderDiag();
+  ch.innerHTML = CAM.optsOpen ? ICON.chevUp : ICON.chevDown; ch.setAttribute('aria-expanded', CAM.optsOpen); ch.hidden = !!CAM.rec;
   $('.cam-timer', CAM.el).hidden = !CAM.rec;
   CAM.el.querySelectorAll('[data-cam="native"],[data-cam="done"]').forEach(x => x.disabled = !!CAM.rec);
   CAM.el.querySelectorAll('[data-bs="-1"]').forEach(b => b.disabled = !!CAM.rec || batchSize() <= 1);
@@ -876,11 +973,13 @@ function camUpdate() {
   lb.classList.toggle('has', !!last);
   renderZoomRow();
 }
-function camMsg(html, withActions) {
+function camMsg(html, withActions, tapToPlay) {
   const m = CAM.el && $('.cam-msg', CAM.el); if (!m) return;
   if (!html) { m.hidden = true; m.innerHTML = ''; return; }
   m.hidden = false;
-  m.innerHTML = `<p>${html}</p>${withActions ? '<div class="cam-msg-acts"><button class="cam-pill" data-cam="retry">Try again</button><button class="cam-pill" data-cam="native">Use iPhone camera</button></div>' : ''}`;
+  m.innerHTML = tapToPlay
+    ? `<button class="cam-pill cam-play" data-cam="play">${html}</button>`
+    : `<p>${html}</p>${withActions ? '<div class="cam-msg-acts"><button class="cam-pill" data-cam="retry">Try again</button><button class="cam-pill" data-cam="native">Use iPhone camera</button></div>' : ''}`;
 }
 function setTorch(on, quiet) {
   CAM.torch = on;
@@ -897,7 +996,8 @@ async function onCamClick(e) {
   const a = b.dataset.cam;
   if (a === 'shoot') return CAM.mode === 'video' ? toggleRecord() : snapPhoto();
   if (a === 'done') return closeCamera(true);
-  if (a === 'retry') return startStream();
+  if (a === 'retry' || a === 'restart') { CAM.optsOpen = false; camUpdate(); return startStream(); }
+  if (a === 'play') { const v = $('.cam-view', CAM.el); try { await v.play(); } catch (err) { camLog('tap play: ' + err.name); } if (v.videoWidth && !v.paused) camMsg(null); else startStream(); return; }
   if (a === 'opts') { CAM.optsOpen = !CAM.optsOpen; return camUpdate(); }
   if (a === 'mode') return switchMode(b.dataset.v);
   if (a === 'zoom') {
@@ -906,7 +1006,10 @@ async function onCamClick(e) {
     if (b.classList.contains('on') && p.z !== null && Math.abs(CAM.zoom - p.z) > 0.05) return zoomTo(p.z, p.lens); // tap active button: snap back to its preset
     return zoomTo(p.z, p.lens);
   }
-  if (a === 'torch') return setTorch(!CAM.torch);
+  if (a === 'torch') {
+    if (CAM.track && !(CAM.caps && CAM.caps.torch)) { toast(CAM.lenses.length ? 'Flash isn’t available on this lens — try the 1× lens' : 'Flash isn’t available on this camera'); return; }
+    return setTorch(!CAM.torch);
+  }
   if (a === 'native') {
     S.settings.camera = 'native'; await saveSettings();
     await closeCamera(false); toast('Switched to the iPhone camera (change it in Menu → Camera)');

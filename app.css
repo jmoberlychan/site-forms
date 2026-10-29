@@ -335,3 +335,38 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 .cam-top > .cam-flash-btn { grid-column: 1; justify-self: start; }
 .cam-top > .cam-top-mid { grid-column: 2; }
 .cam-top > .cam-done { grid-column: 3; }
+
+/* ---------- v1.4.2 camera ---------- */
+.cam-top { position: relative; z-index: 6; }
+.cam-flash-btn.na { opacity: .45; }
+.cam-opts {
+  position: absolute; left: 0; right: 0; top: calc(var(--safe-t) + 58px); z-index: 7;
+  background: rgba(0,0,0,.88); padding: 12px 16px 14px; display: grid; gap: 12px; border-bottom: 1px solid rgba(255,255,255,.12);
+  animation: optsdown .18s ease-out;
+}
+@keyframes optsdown { from { transform: translateY(-10px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .cam-opts { animation: none; } }
+.cam-opts-row { justify-content: center; gap: 10px; flex-wrap: wrap; }
+.cam-diag { font-size: 12px; line-height: 1.45; color: #9aa5a0; text-align: center; }
+.cam-diag b { color: #d6dcd9; font-weight: 600; }
+.cam-err { color: #FF8A8A; }
+.cam-log { color: #6f7a75; word-break: break-word; }
+.cam-play { min-height: 48px; font-size: 17px; background: #FFD60A; color: #000; }
+.cam-modes { visibility: visible; }
+/* zoom wheel */
+.cam-dial { position: absolute; left: 0; right: 0; bottom: 0; height: 170px; pointer-events: none; opacity: 0; transition: opacity .18s;
+  background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.55) 45%); }
+.cam-dial.on { opacity: 1; }
+.cam-dial-svg { position: absolute; left: 0; bottom: 44px; overflow: visible; }
+.cam-dial-svg line.mn { stroke: rgba(255,255,255,.55); stroke-width: 1; }
+.cam-dial-svg line.mj { stroke: #fff; stroke-width: 1.6; }
+.cam-dial-svg text { fill: #fff; font-size: 12px; font-weight: 600; text-anchor: middle; dominant-baseline: middle; font-family: -apple-system, system-ui, sans-serif; }
+.cam-dial-svg .ptr { fill: #FFD60A; }
+.cam-dial-val { position: absolute; left: 50%; bottom: 168px; transform: translateX(-50%); color: #FFD60A; font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px #000; }
+.cam.dialing .cam-zoomrow button:not(.on) { opacity: 0; }
+.cam.dialing .cam-zoomrow { background: transparent; }
+.cam.dialing .cam-zoomrow { opacity: 0; }
+.cam.dialing .cam-ctx { opacity: 0; }
+.cam-dial { height: 150px; }
+.cam-dial-val { bottom: auto; top: 6px; }
+.cam-dial-val { top: -22px; }
