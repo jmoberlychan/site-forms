@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.7.2';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -92,6 +92,7 @@ const shortHash = s => { let h = 0x811c9dc5; for (const ch of String(s).normaliz
 const slug = s => String(s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'u' + shortHash(s);
 const safeName = s => String(s).replace(/[\\/:*?"<>|#%]+/g, '-').replace(/\s+/g, ' ').trim().replace(/^\.+/, '') || 'Unnamed';
 const pad = (n, w) => String(n).padStart(w, '0');
+function isoDay(t) { const d = new Date(t); return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2); }
 function dateKey(t) { const d = new Date(t); return d.getFullYear() + pad(d.getMonth() + 1, 2) + pad(d.getDate(), 2); }
 function stamp(t) { const d = new Date(t); return dateKey(t) + '-' + pad(d.getHours(), 2) + pad(d.getMinutes(), 2) + pad(d.getSeconds(), 2); }   // yyyymmdd-hhmmss: two exports never share a name
 function fmtTime(t) { return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
@@ -183,12 +184,15 @@ function findHeader(rows, tests) {
   }
   return null;
 }
+// Project numbers are ######.## (or ######.##-XXXX). Excel often stores 267180.00 as the number 267180: put the .00 back.
+const PROJ_RE = /^\d{6}\.\d{2}(-[A-Za-z0-9]{4})?$/;
+function fixProjNum(t) { return /^\d{6}(\.\d{1,2})?$/.test(t) ? Number(t).toFixed(2) : t; }
 function parseWorkbook(wb, fileName) {
   const sheets = wb.SheetNames.map(n => ({ name: n, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '', raw: false, blankrows: false }) }));
   let number = '', name = '';
   for (const s of sheets) for (const r of s.rows) {
     const k = norm(r[0]);
-    if (/^(project|job) ?(number|no\.?|#|num)$/.test(k) && String(r[1]).trim()) number = String(r[1]).trim();
+    if (/^(project|job) ?(number|no\.?|#|num)$/.test(k) && String(r[1]).trim()) number = fixProjNum(String(r[1]).trim());
     if (/^(project|job) ?name$/.test(k) && String(r[1]).trim()) name = String(r[1]).trim();
   }
   // Defects: long format (Component | Defect [| Code])
@@ -352,8 +356,9 @@ function confirmImport(parsed) {
     title: existing ? 'Update project lists' : 'New project',
     body: `
       <div class="field"><label for="pnum">Project number</label>
-        <input id="pnum" value="${esc(parsed.number)}" autocomplete="off" autocapitalize="characters" placeholder="e.g. 24-118">
-        <span class="hint">Used at the start of every photo name.</span></div>
+        <input id="pnum" value="${esc(parsed.number)}" autocomplete="off" autocapitalize="characters" placeholder="e.g. 267180.00">
+        <span class="hint">Used at the start of every photo name. Format: 267180.00, or 267180.00-RENO.</span>
+        <span class="hint warn" id="pnum-warn" hidden>This doesn’t look like ######.## or ######.##-XXXX. You can still use it.</span></div>
       <div class="field"><label for="pname">Project name (optional)</label><input id="pname" value="${esc(parsed.name || (existing && existing.name) || '')}"></div>
       <div class="kv"><span>Units</span><span>${parsed.units.length}</span><span>On the schedule</span><span>${nSched || 'None'}</span><span>Components</span><span>${parsed.components.length}</span><span>Defect conditions</span><span>${parsed.defects.length}</span></div>
       <p class="note">${esc(parsed.components.join(', '))}</p>
@@ -361,6 +366,8 @@ function confirmImport(parsed) {
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="do-import">${existing ? 'Update lists' : 'Create project'}</button>`,
     mount(el, close) {
       const go = $('#do-import', el);
+      const pw = () => { const v = $('#pnum', el).value.trim(); $('#pnum-warn', el).hidden = !v || PROJ_RE.test(v); };
+      $('#pnum', el).addEventListener('input', pw); pw();
       go.onclick = async () => {
         if (go.disabled) return;
         const number = $('#pnum', el).value.trim();
@@ -444,7 +451,7 @@ async function addPhotos(files, linkDefectId) {
       const takenAt = Date.now();
       const dk = dateKey(takenAt);
       const seq = await nextSeq(initials, dk);
-      const name = `${safeName(S.project.number)}_${safeName(initials)}_${dk}_${pad(seq, 4)}.${ext}`;
+      const name = `${safeName(S.project.number)} ${isoDay(takenAt)} ${safeName(initials)} ${pad(seq, 4)}.${ext}`;   // 267180.00 2026-10-29 JJM 0001.jpg
       // Original name: the camera/library file name when there is a real one, otherwise a camera-style IMG_ name.
       let orig = String(f.name || '').trim();
       if (!orig || /^(image|photo|img|capture|video|trim\.[\w-]+)(\s*\(\d+\))?\.\w+$/i.test(orig)) orig = genericOrigName(takenAt, ext);
@@ -2611,7 +2618,7 @@ function zipBlob(entries) {
 }
 async function exportRun({ photos, copies, withXls }) {
   const p = S.project; const st = stamp(Date.now());
-  const xname = `${safeName(p.number)}_Defects_${safeName(S.settings.initials || 'XX')}_${st}.xlsx`;   // initials: the PC combine tool keeps the newest per inspector
+  const xname = `${safeName(p.number)} ${isoDay(Date.now())} ${safeName(S.settings.initials || 'XX')} Defects.xlsx`;   // the PC combine tool keeps the newest per inspector
   let xblob = null;
   if (withXls) {
     busy('Building spreadsheet…');
@@ -2658,6 +2665,9 @@ async function exportRun({ photos, copies, withXls }) {
     return new File([blob], j.name, { type: 'application/zip' });
   }, photos: j.photos, copies, label: j.total > 1 ? `Part ${j.idx + 1} of ${j.total}` : 'ZIP' })));
 }
+// Big files can't go through the iOS share sheet (it loads the whole file into memory and the app crashes),
+// so Download (saved to Files › Downloads, streamed from storage) is the main way out.
+let SHARE_MAX = 400 * 1048576;
 function shareStep(steps) {
   let i = 0;
   const next = async () => {
@@ -2665,33 +2675,48 @@ function shareStep(steps) {
     const s = steps[i];
     let file;
     try { file = s.file || await s.lazy(); } catch (e) { busy(null); alertSheet('Export failed', String(e.message || e) + '\n\nTry a smaller export part size in Settings.'); return; }
+    const big = file.size > SHARE_MAX;
+    let url = null;
+    const finish = async how => {
+      if (s.photos.length) {
+        // Only "Yes" marks the photos exported (iOS can report success even when nothing was saved).
+        const yes = await new Promise(res => openSheet({
+          title: 'Did it save?', modal: true,
+          body: how === 'dl'
+            ? `<p>Open the <b>Files</b> app → <b>Downloads</b> and check that <b>${esc(file.name)}</b> is there and is about <b>${mb(file.size)}</b>. A big file can take a minute to finish.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and go into your next export.</p>`
+            : `<p>Check that <b>${esc(file.name)}</b> arrived where you sent it.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and go into your next export.</p>`,
+          foot: `<button class="btn ghost" id="ds-no">Not sure</button><button class="btn" id="ds-yes">Yes, it saved</button>`,
+          mount(e2, c2) { $('#ds-yes', e2).onclick = () => { c2(); res(true); }; $('#ds-no', e2).onclick = () => { c2(); res(false); }; }
+        }));
+        if (yes) {
+          const now = Date.now();
+          for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
+        } else toast('Not marked exported');
+      } else if (how === 'dl') toast('Saved to Files › Downloads');
+      if (url) { const u = url; setTimeout(() => URL.revokeObjectURL(u), 120000); url = null; }
+      i++; next();
+    };
     openSheet({
       title: steps.length > 1 ? `Ready: ${s.label}` : 'Export ready',
       body: `<p class="fname">${esc(file.name)}</p><p class="note">${mb(file.size)}${s.photos.length ? ` · ${s.photos.length} photos` : ''}</p>
-        <p class="note">Tap Save, then choose <b>Save to Files</b>, OneDrive, AirDrop or Mail.</p>`,
-      foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="sv">Save / share</button>`,
+        <p class="note"><b>Download</b> saves it to <b>Files → Downloads</b> on this iPhone, at any size. Move it to OneDrive or your PC from there.</p>
+        <p class="note">${big ? `<b>Share</b> is off for files over ${mb(SHARE_MAX)}: the iPhone share sheet can’t handle them and the app closes.` : '<b>Share</b> opens the iPhone share sheet (Save to Files, OneDrive, AirDrop, Mail).'}</p>`,
+      foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn ghost" id="sh" ${big ? 'disabled' : ''}>Share…</button><button class="btn" id="sv">Download</button>`,
+      onClose() { if (url) { URL.revokeObjectURL(url); url = null; } },
       mount(el, close) {
-        $('#sv', el).onclick = async () => {
-          let ok = false;
+        $('#sv', el).onclick = () => {
+          url = URL.createObjectURL(file);
+          const a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+          const u = url; url = null; close(); url = u;     // keep the link alive while the download runs
+          finish('dl');
+        };
+        $('#sh', el).onclick = async () => {
+          if (big) return;
           try {
-            if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: file.name }); ok = true; }
-            else { const u = URL.createObjectURL(file); const a = document.createElement('a'); a.href = u; a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000); ok = true; }
-          } catch (e) { if (e && e.name === 'AbortError') { toast('Not saved — tap Save again'); return; } toast('Couldn’t share: ' + (e.message || e)); return; }
-          close();
-          if (ok && s.photos.length) {
-            // iOS reports success even if the Files picker was cancelled, so ask. Only "Yes" marks the photos exported.
-            const yes = await new Promise(res => openSheet({
-              title: 'Did it save?', modal: true,
-              body: `<p>Check that <b>${esc(file.name)}</b> arrived where you sent it.</p><p class="note">Photos are only marked exported if you tap Yes. If you’re not sure, they stay unexported and will be included in your next export.</p>`,
-              foot: `<button class="btn ghost" id="ds-no">Not sure</button><button class="btn" id="ds-yes">Yes, it saved</button>`,
-              mount(e2, c2) { $('#ds-yes', e2).onclick = () => { c2(); res(true); }; $('#ds-no', e2).onclick = () => { c2(); res(false); }; }
-            }));
-            if (yes) {
-              const now = Date.now();
-              for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
-            } else toast('Not marked exported');
-          }
-          i++; next();
+            if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: file.name });
+            else { toast('Sharing isn’t available here — use Download'); return; }
+          } catch (e) { if (e && e.name === 'AbortError') { toast('Not saved — tap Download or Share again'); return; } toast('Couldn’t share: ' + (e.message || e)); return; }
+          close(); finish('share');
         };
       }
     });
@@ -2702,8 +2727,9 @@ function shareStep(steps) {
 /* ================= Template + demo ================= */
 function templateWorkbook() {
   const wb = XLSX.utils.book_new();
-  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '24-118'], ['Project Name', 'Example Condominiums'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Number units in the Schedule column (1, 2, 3…) to put them first, in visit order. Leave it blank for units not on the schedule.']]);
+  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '267180.00'], ['Project Name', 'Example Condominiums'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Number units in the Schedule column (1, 2, 3…) to put them first, in visit order. Leave it blank for units not on the schedule.']]);
   proj['!cols'] = [{ wch: 18 }, { wch: 40 }];
+  proj.B1.z = '@';   // text, so Excel keeps 267180.00 instead of turning it into 267180
   const units = XLSX.utils.aoa_to_sheet([['Unit', 'Address', 'Schedule'], ['101', '1200 Example Way #101', ''], ['102', '1200 Example Way #102', 2], ['103', '1200 Example Way #103', ''], ['201', '1200 Example Way #201', 1], ['202', '1200 Example Way #202', ''], ['203', '1200 Example Way #203', 3]]);
   units['!cols'] = [{ wch: 10 }, { wch: 32 }, { wch: 10 }];
   const defects = XLSX.utils.aoa_to_sheet([['Component', 'Code', 'Defect'], ...DEMO_DEFECTS]);

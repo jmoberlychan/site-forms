@@ -10,14 +10,15 @@ exit /b
 #>
 
 # ---------------------------------------------------------------------------------------------
-# Site Defects - combine exports  (for app version 1.7.1 and later)
+# Site Defects - combine exports  (for app version 1.7.1 and later; tool version 1.7.2)
 #
 # What it does:
 #  1. Finds Site Defects export ZIPs: the ones dragged onto this file, otherwise every ZIP in the
 #     folder this file is in, otherwise every ZIP in Downloads.
 #  2. Unpacks them all into ONE folder per project (default C:\Inspections\<project> Inspection),
 #     so photos from every export and every inspector end up in the same Photos\Unit\Component tree.
-#     Files that are already there are skipped. Nothing already in the folder is overwritten.
+#     Files that are already there are skipped. Photos are never overwritten. A spreadsheet is
+#     replaced only by a newer spreadsheet with the same name.
 #  3. Keeps only the newest spreadsheet for each inspector (older copies are still inside the ZIPs).
 #  4. Writes a receipt listing every photo now in the folder. Send it to each inspector and load it
 #     in the app (Menu > Load PC receipt): the phone then clears only photos the PC really has.
@@ -91,6 +92,14 @@ foreach ($f in ($found | Sort-Object { $_.Zip.Name })) {
       if (@($rel -split '/' | Where-Object { $_ -eq '..' -or $_ -eq '' }).Count) { $failed.Add($rel + ' (unsafe name, skipped)'); continue }
       try {
         $dest = Join-Path $base ($rel -replace '/', '\')
+        $isSheet = ($rel -split '/').Count -eq 2 -and $rel -like '*.xlsx'
+        if ((Test-Path -LiteralPath $dest) -and $isSheet) {
+          # same spreadsheet name (one per inspector per day): keep whichever was exported last
+          $old = Get-Item -LiteralPath $dest
+          if ($old.Length -eq $e.Length -or $e.LastWriteTime.DateTime -le $old.LastWriteTime) { $same++; continue }
+          [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
+          $added++; continue
+        }
         if (Test-Path -LiteralPath $dest) {
           if ((Get-Item -LiteralPath $dest).Length -eq $e.Length) { $same++; continue }
           # same name but a different file: keep both, never overwrite
@@ -126,12 +135,14 @@ foreach ($root in $projects) {
   Write-Host ($root + '  ->  ' + $dir) -ForegroundColor Cyan
 
   $groups = @{}
-  foreach ($x in @(Get-ChildItem -LiteralPath $dir -Filter '*_Defects_*.xlsx' -File -ErrorAction SilentlyContinue)) {
-    $m = [regex]::Match($x.Name, '_Defects_(?:([A-Za-z0-9]+)_)?(\d{8})-(\d{4,6})(?: \(\d+\))?\.xlsx$')
+  foreach ($x in @(Get-ChildItem -LiteralPath $dir -Filter '*Defects*.xlsx' -File -ErrorAction SilentlyContinue)) {
+    # new names: "267180.00 2026-10-29 JJM Defects.xlsx"; older: "24-118_Defects_JM_20261029-113000.xlsx"
+    $m = [regex]::Match($x.Name, '^.+ \d{4}-\d{2}-\d{2} ([A-Za-z0-9]+) Defects(?: \(\d+\))?\.xlsx$')
+    if (-not $m.Success) { $m = [regex]::Match($x.Name, '_Defects_(?:([A-Za-z0-9]+)_)?\d{8}-\d{4,6}(?: \(\d+\))?\.xlsx$') }
     if (-not $m.Success) { continue }
     $who = $m.Groups[1].Value.ToUpper()
     if (-not $groups.ContainsKey($who)) { $groups[$who] = New-Object System.Collections.Generic.List[object] }
-    $groups[$who].Add([pscustomobject]@{ File = $x; Key = $m.Groups[2].Value + $m.Groups[3].Value.PadRight(6, '0') })
+    $groups[$who].Add([pscustomobject]@{ File = $x; Key = $x.LastWriteTime.Ticks })   # file time = when it was exported
   }
   foreach ($who in $groups.Keys) {
     $list = @($groups[$who] | Sort-Object Key -Descending)

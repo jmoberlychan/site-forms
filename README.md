@@ -20,7 +20,7 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
 ## Using it
 
 1. **First launch:** enter your initials.
-2. **Import the project Excel:** use `Site Defects - Project Template.xlsx`. It has three sheets: Project (number and name), Units (Unit, Address, Schedule), and Defects (Component, Code, Defect).
+2. **Import the project Excel:** use `Site Defects - Project Template.xlsx`. It has three sheets: Project (number and name), Units (Unit, Address, Schedule), and Defects (Component, Code, Defect). Project numbers are `######.##`, for example `267180.00`, or with a 4-character identifier for older projects, for example `267180.00-RENO`. If Excel turns `267180.00` into `267180`, the app puts the `.00` back. The app warns, but still accepts it, if a number doesn't fit either format.
 3. **Schedule:** number units in the Units sheet's **Schedule** column (1, 2, 3…), or add a sheet named **Schedule** that lists units in visit order. Scheduled units appear first in the unit list, in that order. All other units follow underneath.
 4. **On site:** choose the unit and component. They stay selected until you change them. Use ‹ › to move to the next unit in schedule order.
 5. **Adding to the lists:** add a unit from the unit list (**+ Add unit**), a component from the component list (**+ Add component**), or a condition from the bottom of the condition list. Items from the import file are locked and can't be deleted. Items added on site can be deleted from **Menu → Edit lists**.
@@ -29,7 +29,7 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
    - *Defect first:* tap **📷 Photo** on a condition. The photo is linked to that condition.
    - *Photo first:* tap the big **Photo** button. Afterwards, link the photo to a condition (**Link** or **Link + 1**), or keep it unlinked and take more. To review unlinked photos later, open **Unlinked**, select the best shot and link it. Unlinked photos belong to the unit, not the component: every component at that unit sees them, grouped by the component they were taken under (they never carry over to another unit). For example, roof photos taken while you were on Stucco can be linked later from Roofs. A photo linked to another component's condition moves into that component's folder, and the Photo Log's **Taken during** column records where it was taken. Photos taken at the wrong unit can be moved: in **Unlinked**, select one or more photos, tap **Move**, and pick the unit (scheduled units are listed first, and you can search). They become unlinked photos at that unit, under the same component, and export into that unit's folder. The Photo Log's **Moved from unit** column records where they were taken.
    - *Batches:* **Photos before linking** (– 1…10 +, above the camera button) sets how many photos you take before linking them all to one condition. You can change it at any time, including mid-batch.
-   - **Video:** in the camera, swipe to **Video** (or tap the video icon) and record. Videos are named, sorted, linked and exported exactly like photos (for example `24-118_JM_20261028_0043.mov`) and share the same numbering. They're stored as recorded, so they use a lot of space: about 60–200 MB per minute.
+   - **Video:** in the camera, swipe to **Video** (or tap the video icon) and record. Videos are named, sorted, linked and exported exactly like photos (for example `267180.00 2026-10-28 JJM 0043.mov`) and share the same numbering. They're stored as recorded, so they use a lot of space: about 60–200 MB per minute.
    - Photos and videos taken earlier with the iPhone Camera app can be added from **Menu → Add photos & videos from library**.
    - **Built-in camera (trial):** switch between the iPhone camera and the built-in camera in **Menu → Camera** or **Settings**. Version 1.4.1 lays it out like the iPhone Camera app:
      - **Top bar:** flash on the left (tap once and it stays on), the options chevron in the middle, and **Done** on the right. The chevron drops an options panel down from the top: photos before linking, **Restart camera**, **Use iPhone camera**, and **Camera details** (which camera iOS opened, its resolution, whether it offers flash, and any startup error). While recording, a red timer replaces the chevron.
@@ -43,9 +43,10 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
 8. **Notes:** each condition has a **Note** field. Each unit and component also has its own General notes box.
 9. **Export:** choose what to export (spreadsheet + photos, photos only, or spreadsheet only), which copies (sorted, unsorted, or both), and which photos (not yet exported, or all). **Sorted** puts renamed photos in `Photos/<Unit>/<Component>/`. **Unsorted** puts every photo in one `Unsorted/` folder with two sub-folders: `Original names/` and `Renamed/`. Unzip the ZIP and keep the spreadsheet next to the Photos folder; then the photo links open from Excel.
    - **ZIP size:** set in **Settings → Export part size**, from 250 MB up to 10 GB (2 GB by default). The ZIP is built from the files already on the phone, so big parts don't run the phone out of memory. When you save a ZIP, iOS briefly needs free space about the size of the ZIP. Each copy counts: with Sorted + Unsorted, one 7 MB photo adds about 21 MB, so a 10 GB ZIP holds about 480 photos.
-   - **Spreadsheet:** its name includes your initials and the time, for example `24-118_Defects_JM_20261029-173012.xlsx`. The PC combine tool keeps only the newest one for each inspector.
+   - **Spreadsheet:** named `<Project#> <YYYY-MM-DD> <Initials> Defects.xlsx`, for example `267180.00 2026-10-29 JJM Defects.xlsx`. Later exports the same day have the same name; the PC combine tool keeps only the newest one for each inspector.
    - **Combining on the PC:** use the combine tool (below) rather than unzipping by hand.
-   - **Did it save?** After each Save / share, the app asks whether the file arrived. Only **Yes** marks those photos as exported. If you tap **Not sure**, they stay unexported and go into the next export.
+   - **Download or Share:** when an export is ready, **Download** saves it to **Files → Downloads** on the iPhone, at any size; move it to OneDrive or the PC from there. **Share…** opens the iPhone share sheet (AirDrop, Mail, OneDrive), but only for files up to 400 MB: the share sheet loads the whole file into memory, and bigger files make the app close.
+   - **Did it save?** After each Download or Share, the app asks whether the file arrived. Only **Yes** marks those photos as exported. If you tap **Not sure**, they stay unexported and go into the next export.
    - A single video bigger than the ZIP part size goes into a ZIP part of its own.
    - **Defective, no photo:** if any condition is marked 1 with no photo, the Export panel says how many. Tap it for the list; tap a row to go straight to that unit, component and condition. A bar at the bottom then shows **No photo: 1 of 5** with **Next ›** to step through the rest. The same list is in **Menu → Defective, no photo**.
 
@@ -55,7 +56,7 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
 
 1. Collect everyone's export ZIPs in one folder on the PC (for example a project folder in Downloads).
 2. Put `Combine Site Defects exports.cmd` in that folder and double-click it. (You can also drag ZIPs onto it.) The first time, Windows may say it protected your PC: click **More info → Run anyway**.
-3. Press Enter to combine into `C:\Inspections`, or type another folder. Each project gets one folder, for example `C:\Inspections\24-118 Inspection`, with one `Photos\Unit\Component` tree. Files already there are skipped, and nothing is ever overwritten: if two different files have the same name, both are kept.
+3. Press Enter to combine into `C:\Inspections`, or type another folder. Each project gets one folder, for example `C:\Inspections\267180.00 Inspection`, with one `Photos\Unit\Component` tree. Files already there are skipped. Photos are never overwritten: if two different photos have the same name, both are kept. A spreadsheet is replaced only by a newer export of the same spreadsheet.
 4. The newest spreadsheet for each inspector is kept beside the Photos folder; older ones are removed from that folder (they're still inside the original ZIPs). The spreadsheet's photo links open from there.
 5. The tool writes a **receipt** in the project's `Receipts` folder and opens it in Explorer. Send it to each inspector by email, Teams or AirDrop.
 
@@ -77,7 +78,9 @@ Always open the app from its Home Screen icon. If it's opened in a Safari tab in
 
 ## Photo names
 
-`<Project#>_<Initials>_<YYYYMMDD>_<####>.jpg`, for example `24-118_JM_20261028_0042.jpg`.
+`<Project#> <YYYY-MM-DD> <Initials> <####>.jpg`, for example `267180.00 2026-10-02 JJM 0042.jpg` or `267180.00-RENO 2026-10-02 JJM 0042.jpg`.
+
+Photos taken before version 1.7.2 keep their old names (`<Project#>_<Initials>_<YYYYMMDD>_<####>.jpg`), so spreadsheets and folders already exported still match.
 
 The number restarts at 0001 each day for each inspector. The date is included so names never repeat across days. Deleted photo numbers are not reused, even if the project is deleted and imported again under the same project number.
 
@@ -110,7 +113,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
 
 To go back to a version, upload **all 10 files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 
