@@ -1,6 +1,6 @@
 // Caches the whole app so it runs with no connection.
 // Bump VERSION whenever any app file changes so phones pick up the update.
-const VERSION = 'site-defects-v1.1.0';
+const VERSION = 'site-defects-v1.3.0';
 const FILES = [
   './',
   'index.html',
