@@ -1,6 +1,7 @@
-// Caches the whole app so it runs with no connection.
-// Bump VERSION whenever any app file changes so phones pick up the update.
-const VERSION = 'site-defects-v1.3.0';
+// Site Defects service worker.
+// Online: always fetches the newest app files from the server (so updates arrive on the next open).
+// Offline or very weak signal: serves the copy saved on the phone.
+const VERSION = 'site-defects-v1.3.2';
 const FILES = [
   './',
   'index.html',
@@ -13,9 +14,10 @@ const FILES = [
   'icon-512.png',
   'apple-touch-icon.png',
 ];
+const NETWORK_TIMEOUT_MS = 4000;
 
 self.addEventListener('install', e => {
-  // cache: 'reload' skips the browser's HTTP cache so an update always gets the new files, never stale copies.
+  // cache: 'reload' skips the browser's HTTP cache so the saved copy is always the newest.
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
@@ -27,16 +29,31 @@ self.addEventListener('activate', e => {
   );
 });
 
+function fromCache(req) {
+  return caches.match(req, { ignoreSearch: true })
+    .then(hit => hit || (req.mode === 'navigate' ? caches.match('index.html') : undefined));
+}
+
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
-  e.respondWith(
-    caches.match(req, { ignoreSearch: true }).then(hit => {
-      if (hit) return hit;
-      return fetch(req).then(res => {
-        if (res.ok) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(req, copy)); }
-        return res;
-      }).catch(() => req.mode === 'navigate' ? caches.match('index.html') : Response.error());
-    })
-  );
+  e.respondWith(new Promise(resolve => {
+    let settled = false;
+    const done = r => { if (!settled && r) { settled = true; resolve(r); } };
+    // Weak signal: fall back to the saved copy after a few seconds.
+    const timer = setTimeout(() => fromCache(req).then(done), NETWORK_TIMEOUT_MS);
+    fetch(req, { cache: 'no-cache' }).then(res => {
+      clearTimeout(timer);
+      if (res && res.ok) {
+        const copy = res.clone();
+        caches.open(VERSION).then(c => c.put(req, copy));
+        done(res);
+      } else {
+        fromCache(req).then(hit => done(hit || res));
+      }
+    }).catch(() => {
+      clearTimeout(timer);
+      fromCache(req).then(hit => done(hit || Response.error()));
+    });
+  }));
 });

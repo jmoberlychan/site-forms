@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.2';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -1042,6 +1042,7 @@ function renderWelcome(app) {
     $('#demo').onclick = loadDemo;
   }
 }
+function pageVersion() { const m = document.querySelector('meta[name="app-version"]'); return m ? m.content : ''; }
 function openMenu() {
   openSheet({
     title: 'Menu',
@@ -1052,7 +1053,7 @@ function openMenu() {
       <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
       <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
       <li><button id="m-tpl"><span>Get the Excel template</span><span class="meta">›</span></button></li>
-    </ul><p class="note" style="margin-top:14px">Version ${APP_VERSION}. Data is stored only on this phone. Export regularly as a backup.</p>`,
+    </ul><p class="note" style="margin-top:14px">Version ${APP_VERSION}${pageVersion() && pageVersion() !== APP_VERSION ? ` <b class="warn">(page ${esc(pageVersion())} — files out of step: re-upload all app files)</b>` : ''}. Data is stored only on this phone. Export regularly as a backup.</p>`,
     mount(el, close) {
       $('#m-proj', el).onclick = () => { close(); openProjects(); };
       $('#m-lib', el).onclick = () => { close(); fromLibrary(); };
@@ -1462,9 +1463,19 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').then(reg => {
       reg.addEventListener('updatefound', () => {
         const w = reg.installing;
-        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) toast('Update ready — reopen the app to use it'); });
+        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) toast('Updating…'); });
       });
+      reg.update().catch(() => {});
     }).catch(() => {});
+    // When a new version takes over, reload once so it's used straight away (skipped mid-task).
+    let hadController = !!navigator.serviceWorker.controller, reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) { hadController = true; return; }
+      if (reloaded) return;
+      const busyNow = document.querySelector('.scrim, .busy') || (document.activeElement && /TEXTAREA|INPUT/.test(document.activeElement.tagName));
+      if (busyNow) { toast('Update downloaded — it applies next time you open the app'); return; }
+      reloaded = true; location.reload();
+    });
   });
 }
 
