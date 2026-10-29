@@ -10,7 +10,7 @@ exit /b
 #>
 
 # ---------------------------------------------------------------------------------------------
-# Site Defects - combine exports  (for app version 1.7.1 and later; tool version 1.7.2)
+# Site Defects - combine exports  (for app version 1.7.1 and later; tool version 1.7.4b)
 #
 # What it does:
 #  1. Finds Site Defects export ZIPs: the ones dragged onto this file, otherwise every ZIP in the
@@ -79,6 +79,34 @@ $ans = Read-Host ('Combine into ' + $base + ' ?  Press Enter for yes, or type an
 if ($ans -and $ans.Trim()) { $base = $ans.Trim().Trim('"') }
 New-Item -ItemType Directory -Force -Path $base | Out-Null
 
+# ---- spreadsheets open in Excel can't be replaced: ask for them to be closed first ----
+function Test-Locked([string]$path) {
+  try { $fs = [IO.File]::Open($path, 'Open', 'ReadWrite', 'None'); $fs.Close(); return $false } catch { return $true }
+}
+function Get-OpenSheets {
+  $open = New-Object System.Collections.Generic.List[string]
+  foreach ($root in $projects) {
+    $dir = Join-Path $base $root
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    foreach ($x in @(Get-ChildItem -LiteralPath $dir -Filter '*.xlsx' -File -ErrorAction SilentlyContinue)) {
+      if ($x.Name -like '~$*') { continue }   # Excel's own lock file, not a spreadsheet
+      if (Test-Locked $x.FullName) { $open.Add($x.FullName) }
+    }
+  }
+  return ,$open
+}
+$skipSheets = $false
+while ($true) {
+  $open = Get-OpenSheets
+  if ($open.Count -eq 0) { break }
+  Write-Host ''
+  Write-Host 'These spreadsheets are open (probably in Excel), so they cannot be updated:' -ForegroundColor Yellow
+  $open | ForEach-Object { Write-Host ('  ' + $_) }
+  $a = Read-Host 'Close them, then press Enter to continue  (or type S to carry on and leave the spreadsheets as they are)'
+  if ($a -and $a.Trim().ToUpper() -eq 'S') { $skipSheets = $true; break }
+}
+$sheetNotes = New-Object System.Collections.Generic.List[string]
+
 $added = 0; $same = 0
 $conflicts = New-Object System.Collections.Generic.List[string]
 $failed = New-Object System.Collections.Generic.List[string]
@@ -97,8 +125,18 @@ foreach ($f in ($found | Sort-Object { $_.Zip.Name })) {
           # same spreadsheet name (one per inspector per day): keep whichever was exported last
           $old = Get-Item -LiteralPath $dest
           if ($old.Length -eq $e.Length -or $e.LastWriteTime.DateTime -le $old.LastWriteTime) { $same++; continue }
-          [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
-          $added++; continue
+          if ($skipSheets) { $sheetNotes.Add('Not updated (left open): ' + $rel); continue }
+          # unpack beside it first, then swap, so the old spreadsheet is never half-written
+          $tmp = $dest + '.new'
+          try {
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $tmp, $true)
+            Move-Item -LiteralPath $tmp -Destination $dest -Force
+            $added++
+          } catch {
+            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+            $sheetNotes.Add('Could not update (is it open in Excel?): ' + $rel)
+          }
+          continue
         }
         if (Test-Path -LiteralPath $dest) {
           if ((Get-Item -LiteralPath $dest).Length -eq $e.Length) { $same++; continue }
@@ -135,7 +173,7 @@ foreach ($root in $projects) {
   Write-Host ($root + '  ->  ' + $dir) -ForegroundColor Cyan
 
   $groups = @{}
-  foreach ($x in @(Get-ChildItem -LiteralPath $dir -Filter '*Defects*.xlsx' -File -ErrorAction SilentlyContinue)) {
+  foreach ($x in @(Get-ChildItem -LiteralPath $dir -Filter '*Defects*.xlsx' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '~$*' })) {
     # new names: "267180.00 2026-10-29 JJM Defects.xlsx"; older: "24-118_Defects_JM_20261029-113000.xlsx"
     $m = [regex]::Match($x.Name, '^.+ \d{4}-\d{2}-\d{2} ([A-Za-z0-9]+) Defects(?: \(\d+\))?\.xlsx$')
     if (-not $m.Success) { $m = [regex]::Match($x.Name, '_Defects_(?:([A-Za-z0-9]+)_)?\d{8}-\d{4,6}(?: \(\d+\))?\.xlsx$') }
@@ -146,11 +184,15 @@ foreach ($root in $projects) {
   }
   foreach ($who in $groups.Keys) {
     $list = @($groups[$who] | Sort-Object Key -Descending)
-    for ($i = 1; $i -lt $list.Count; $i++) { Remove-Item -LiteralPath $list[$i].File.FullName }
+    $gone = 0
+    for ($i = 1; $i -lt $list.Count; $i++) {
+      try { Remove-Item -LiteralPath $list[$i].File.FullName -ErrorAction Stop; $gone++ }
+      catch { $sheetNotes.Add('Older spreadsheet not removed (is it open in Excel?): ' + $list[$i].File.Name) }
+    }
     $label = 'Spreadsheet'
     if ($who) { $label = 'Spreadsheet (' + $who + ')' }
     $note = ''
-    if ($list.Count -gt 1) { $note = '   (' + ($list.Count - 1) + ' older removed)' }
+    if ($gone) { $note = '   (' + $gone + ' older removed)' }
     Write-Host ('  ' + $label + ': ' + $list[0].File.Name + $note)
   }
 
@@ -183,6 +225,10 @@ Write-Host ('Done. ' + $added + ' new file(s) added, ' + $same + ' already there
 if ($conflicts.Count) {
   Write-Host ('' + $conflicts.Count + ' file(s) had the same name as a different file already there. Both were kept:') -ForegroundColor Yellow
   $conflicts | ForEach-Object { Write-Host ('  ' + $_) }
+}
+if ($sheetNotes.Count) {
+  Write-Host 'Spreadsheets (photos and the receipt are not affected; close Excel and run the tool again to finish these):' -ForegroundColor Yellow
+  $sheetNotes | ForEach-Object { Write-Host ('  ' + $_) }
 }
 if ($failed.Count) {
   Write-Host ('' + $failed.Count + ' file(s) could not be unpacked. They are NOT in the receipt, so the phones keep them:') -ForegroundColor Red
