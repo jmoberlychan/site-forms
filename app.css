@@ -419,3 +419,5 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 .cam.is-video .cam-top { background: linear-gradient(rgba(0,0,0,.45), rgba(0,0,0,0)); }
 .cam-zoomrow { bottom: calc(12px + var(--lift, 0px)); }
 .cam-dial { bottom: var(--lift, 0px); }
+/* v1.5.0: unlinked photos grouped by the component they were taken under */
+.tray-h { font-size: 13px; font-weight: 700; color: var(--muted); margin: 12px 0 6px; }

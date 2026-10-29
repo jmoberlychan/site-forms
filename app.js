@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.4.6';
+const APP_VERSION = '1.5.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -412,6 +412,11 @@ async function checkStorage(force) {
 async function savePhotoMeta(p) { await put('photos', p); }
 async function linkPhoto(photo, defectId, setValue, skipPhotoSave) {
   const unit = photo.unit;
+  const d = defectById(defectId);
+  if (d && !photo.defectIds.length && d.component !== photo.component) {
+    photo.takenDuring = photo.takenDuring || photo.component;   // remembered for the Photo Log
+    photo.component = d.component;                              // exported into the component it proves
+  }
   const o = await ensureObs(unit, defectId);
   if (!o.photoIds.includes(photo.id)) o.photoIds.push(photo.id);
   if (setValue) o.value = setValue;
@@ -458,7 +463,19 @@ function thumbHTML(p, opts = {}) {
     <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}</button>`;
 }
 function photoById(id) { return S.photos.find(p => p.id === id); }
-function trayPhotos() { const { unit, component } = ctx(); return S.photos.filter(p => p.unit === unit && p.component === component && !p.defectIds.length); }
+// Unlinked photos belong to the unit, not the component: any component at the same unit can use them.
+function trayPhotos() {
+  const { unit, component } = ctx();
+  return S.photos.filter(p => p.unit === unit && !p.defectIds.length)
+    .sort((a, b) => (a.component !== component) - (b.component !== component) || a.takenAt - b.takenAt);
+}
+// Show photos grouped by the component they were taken under, the current one first.
+function trayGroupsHTML(ps, thumb) {
+  const cur = ctx().component, groups = new Map();
+  for (const p of ps) { if (!groups.has(p.component)) groups.set(p.component, []); groups.get(p.component).push(p); }
+  return [...groups].map(([c, list]) => `<div class="tray-h">${c === cur ? 'Taken here' : 'Taken during ' + esc(c)} · ${list.length}</div>
+    <div class="thumbs" style="flex-wrap:wrap">${list.map(thumb).join('')}</div>`).join('');
+}
 
 let pendingCapture = null;
 let batch = null; // photos taken in the current batch, assigned together once it's full
@@ -1565,8 +1582,8 @@ function openTray() {
   const draw = (el) => {
     const ps = trayPhotos();
     $('.sheet-body', el).innerHTML = ps.length
-      ? `<p class="note">Unlinked photos at <b>${esc(ctx().unit)}</b> · ${esc(ctx().component)}. Select the ones that prove a condition, then link them. The rest stay in the folder as extra photos.</p>
-         <div class="thumbs" style="flex-wrap:wrap">${ps.map(p => thumbHTML(p, { selectable: true, badge: '#' + p.seq })).join('')}</div>`
+      ? `<p class="note">Unlinked photos at unit <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. The rest stay at this unit.</p>
+         ${trayGroupsHTML(ps, p => thumbHTML(p, { selectable: true, badge: '#' + p.seq }))}`
       : `<div class="empty"><h2>No unlinked photos</h2>Photos taken with the big camera button land here until you link them.</div>`;
     const n = S.selecting.size;
     $('.sheet-foot', el).innerHTML = `<button class="btn ghost" id="t-del" ${n ? '' : 'disabled'}>Delete${n ? ' ' + n : ''}</button>
@@ -1601,7 +1618,7 @@ async function viewPhoto(id) {
   const p = photoById(id); if (!p) return;
   const blob = hasBlob(p) ? await get('blobs', id) : null; const url = blob ? URL.createObjectURL(blob) : '';
   const tsrc = url ? '' : await thumbSrc(id);
-  const comp = p.component; const ds = defectsFor(comp);
+  const comp = !p.defectIds.length && ctx().unit === p.unit && ctx().component ? ctx().component : p.component; const ds = defectsFor(comp);
   const draw = el => {
     $('.sheet-body', el).innerHTML = `${isVideo(p) && url ? `<video class="viewer-img" src="${url}" controls playsinline preload="metadata"></video>` : `<img class="viewer-img" src="${url || tsrc}" alt="">`}
       ${url ? '' : '<p class="note">The full-size file was exported and removed from this phone to free space. This is the thumbnail.</p>'}
@@ -1757,16 +1774,16 @@ document.addEventListener('input', e => { const t = e.target.closest('[data-note
 
 function attachToDefect(defectId) {
   const ps = trayPhotos(); const d = defectById(defectId);
-  if (!ps.length) { toast('No unlinked photos here — use the big camera button first'); return; }
+  if (!ps.length) { toast('No unlinked photos at this unit — use the big camera button first'); return; }
   const chosen = new Set();
   openSheet({
     title: 'Link unlinked photos',
-    body: `<p class="note">Pick the photos that prove <b>${esc(d.label)}</b>.</p><div class="thumbs" style="flex-wrap:wrap" id="pick-grid"></div>`,
+    body: `<p class="note">Pick the photos that prove <b>${esc(d.label)}</b>. Unlinked photos from every component at this unit are shown.</p><div id="pick-grid"></div>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="go" disabled>Link</button>`,
     mount(el, close) {
       const grid = $('#pick-grid', el);
       const draw = () => {
-        grid.innerHTML = ps.map(p => `<button class="thumb${chosen.has(p.id) ? ' sel' : ''}" data-pick="${p.id}"><img data-thumb="${p.id}" alt="">${chosen.has(p.id) ? '<span class="chk">✓</span>' : ''}<span class="badge">#${p.seq}</span></button>`).join('');
+        grid.innerHTML = trayGroupsHTML(ps, p => `<button class="thumb${chosen.has(p.id) ? ' sel' : ''}" data-pick="${p.id}"><img data-thumb="${p.id}" alt="">${chosen.has(p.id) ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}<span class="badge">#${p.seq}</span></button>`);
         hydrateThumbs(grid); $('#go', el).disabled = !chosen.size; $('#go', el).textContent = 'Link' + (chosen.size ? ' ' + chosen.size : '');
       };
       draw();
@@ -2020,16 +2037,16 @@ function buildWorkbook() {
   orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
 
   /* --- Photo log --- */
-  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder']];
+  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during']];
   const sortedPh = [...S.photos].sort((a, b) => a.takenAt - b.takenAt);
   for (const ph of sortedPh) {
     const ds = ph.defectIds.map(defectById).filter(Boolean);
     pRows.push([hyperlink(ph.name, photoPath(ph)), isVideo(ph) ? 'Video' : 'Photo', origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
-      ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, '')]);
+      ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '']);
   }
   const wsP = XLSX.utils.aoa_to_sheet(pRows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }];
-  wsP['!autofilter'] = { ref: `A1:J${Math.max(pRows.length, 2)}` };
+  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }];
+  wsP['!autofilter'] = { ref: `A1:K${Math.max(pRows.length, 2)}` };
 
   /* --- About --- */
   const info = [
