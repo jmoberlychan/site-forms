@@ -382,3 +382,7 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 .cam-freeze { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform-origin: 50% 50%; pointer-events: none; }
 .cam-tele { display: flex; justify-content: center; align-items: center; gap: 10px; font-size: 14px; color: #d6dcd9; }
 .cam-tele select { background: rgba(255,255,255,.14); color: #fff; border: 0; border-radius: 8px; padding: 6px 10px; font-size: 15px; }
+/* v1.4.4: tighter wheel */
+.cam-dial { height: 128px; }
+.cam-dial-svg { bottom: 48px; }
+.cam-dial-svg text { font-size: 9.5px; }
