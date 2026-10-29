@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.4.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -40,7 +40,7 @@ async function byProject(store, pid) { const d = await db(); return reqP(d.trans
 
 /* ================= State ================= */
 const S = {
-  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250, batch: 1 },
+  settings: { initials: '', activeProjectId: null, photoMax: 0, partMB: 250, batch: 1, camera: 'native', vidQ: '1080' },
   projects: [],
   project: null,
   obs: new Map(),        // key -> obs
@@ -465,6 +465,7 @@ let batch = null; // photos taken in the current batch, assigned together once i
 function capture(defectId, continuing) {
   if (!requireContext()) return;
   if (!continuing || !batch) batch = { defectId: defectId || null, photos: [] };
+  if (S.settings.camera === 'builtin' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) { openCamera(); return; }
   pendingCapture = { defectId: batch.defectId };
   const inp = $('#cam-input'); inp.value = ''; inp.click();
 }
@@ -484,7 +485,11 @@ function stepperHTML() {
 document.addEventListener('click', e => { const b = e.target.closest('[data-bs]'); if (b) setBatchSize(batchSize() + Number(b.dataset.bs)); });
 function finishBatch() {
   const b = batch; batch = null; if (!b || !b.photos.length) return;
-  if (b.defectId) { toast(`${b.photos.length} photo${b.photos.length > 1 ? 's' : ''} linked to ${defectById(b.defectId).label}`); return; }
+  if (b.defectId) {
+    const nv = b.photos.filter(isVideo).length, np = b.photos.length - nv;
+    const what = [np ? `${np} photo${np > 1 ? 's' : ''}` : '', nv ? `${nv} video${nv > 1 ? 's' : ''}` : ''].filter(Boolean).join(' + ');
+    toast(`${what} linked to ${defectById(b.defectId).label}`); return;
+  }
   linkSheet(b.photos, true);
 }
 function batchSheet() {
@@ -536,6 +541,231 @@ function requireContext() {
   if (!S.project.state.unit) { pickUnit(); return false; }
   if (!S.project.state.component) { pickComponent(); return false; }
   return true;
+}
+
+/* ================= Built-in camera (trial, v1.4) =================
+   A live viewfinder inside the app: tap the shutter repeatedly with no "Use Photo" step.
+   Photos are frames from the camera stream (iOS limits web apps to the video feed's resolution).
+   Videos are recorded with MediaRecorder at a set quality, which is sharper than the iPhone camera's
+   web-upload video. Everything is saved through the same addPhotos() path as the iPhone camera. */
+const CAM = { el: null, stream: null, track: null, mode: 'photo', rec: null, chunks: [], recStart: 0, recTimer: null,
+  lenses: [], deviceId: null, torch: false, busy: false, starting: false };
+const REC_MAX_SEC = 300;
+const VQ = { '1080': { w: 1920, h: 1080, bps: 12e6, label: '1080p' }, '4k': { w: 3840, h: 2160, bps: 25e6, label: '4K' } };
+function pickRecMime() {
+  if (typeof MediaRecorder === 'undefined') return '';
+  for (const m of ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm']) { try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (_) {} }
+  return '';
+}
+function camCtxHTML() {
+  const { unit, component } = ctx(); const d = batch && batch.defectId ? defectById(batch.defectId) : null;
+  return `<b>${esc(unit)}</b> · ${esc(component)}${d ? `<span class="cam-sub">Linking to: ${esc(d.label)}</span>` : ''}`;
+}
+function openCamera() {
+  if (CAM.el) return;
+  CAM.mode = CAM.mode === 'video' && pickRecMime() ? 'video' : 'photo';
+  const el = document.createElement('div'); el.className = 'cam'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Camera');
+  el.innerHTML = `
+    <video class="cam-view" playsinline autoplay muted></video>
+    <div class="cam-flash"></div>
+    <div class="cam-top">
+      <button class="cam-pill" data-cam="done">Done</button>
+      <div class="cam-ctx">${camCtxHTML()}</div>
+      <button class="cam-pill cam-torch" data-cam="torch" hidden aria-pressed="false" aria-label="Flashlight">⚡</button>
+    </div>
+    <div class="cam-msg" hidden></div>
+    <div class="cam-rec" hidden><span class="dot"></span><span class="t">0:00</span></div>
+    <div class="cam-controls">
+      <div class="cam-lenses" hidden></div>
+      <input class="cam-zoom" type="range" min="1" max="1" step="0.1" value="1" hidden aria-label="Zoom">
+      <div class="cam-info"><span class="cam-res"></span><span class="cam-count"></span></div>
+      <div class="cam-row">
+        <button class="cam-last" data-cam="last" aria-label="Captured so far"></button>
+        <button class="cam-shutter" data-cam="shoot" aria-label="Take photo"><span></span></button>
+        <div class="cam-modes" role="radiogroup">
+          <button role="radio" data-cam="mode" data-v="photo">Photo</button>
+          <button role="radio" data-cam="mode" data-v="video">Video</button>
+        </div>
+      </div>
+      <div class="cam-bottom">${stepperHTML()}<button class="cam-link" data-cam="native">Use iPhone camera</button></div>
+    </div>`;
+  document.body.appendChild(el); CAM.el = el;
+  document.documentElement.classList.add('cam-open');
+  el.addEventListener('click', onCamClick);
+  $('.cam-zoom', el).addEventListener('input', e => setZoom(+e.target.value));
+  document.addEventListener('batchchange', camUpdate);
+  document.addEventListener('visibilitychange', camVisibility);
+  camUpdate(); startStream();
+}
+async function startStream() {
+  if (!CAM.el || CAM.starting) return;
+  CAM.starting = true; stopTracks();
+  const q = VQ[S.settings.vidQ] || VQ['1080'];
+  const video = CAM.mode === 'video'
+    ? { width: { ideal: q.w }, height: { ideal: q.h }, frameRate: { ideal: 30 } }
+    : { width: { ideal: 4096 }, height: { ideal: 3072 } };
+  if (CAM.deviceId) video.deviceId = { exact: CAM.deviceId }; else video.facingMode = { ideal: 'environment' };
+  camMsg('Starting camera…');
+  try {
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ video, audio: CAM.mode === 'video' }); }
+    catch (e) {
+      if (CAM.mode === 'video' && /NotAllowed|NotFound/.test(e.name)) { stream = await navigator.mediaDevices.getUserMedia({ video, audio: false }); toast('Recording without sound — microphone not allowed'); }
+      else throw e;
+    }
+    if (!CAM.el) { stream.getTracks().forEach(t => t.stop()); return; }
+    CAM.stream = stream; CAM.track = stream.getVideoTracks()[0];
+    const v = $('.cam-view', CAM.el); v.srcObject = stream; await v.play().catch(() => {});
+    await new Promise(r => v.videoWidth ? r() : (v.onloadedmetadata = () => r()));
+    camMsg(null);
+    if (!CAM.lenses.length) await findLenses();
+    camCaps(); camUpdate();
+  } catch (e) {
+    const blocked = e && e.name === 'NotAllowedError';
+    camMsg(blocked
+      ? 'Camera access is blocked for this app.<br>On iPhone: Settings → Apps → Safari → Camera → Allow, then reopen the app.'
+      : 'The camera couldn’t start' + (e && e.message ? ': ' + esc(e.message) : '.'), true);
+  } finally { CAM.starting = false; }
+}
+async function findLenses() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const pick = (re, label) => { const d = devs.find(x => re.test(x.label)); return d ? { id: d.deviceId, label } : null; };
+    const lenses = [pick(/back.*ultra ?wide/i, '0.5×'), pick(/^back camera$/i, '1×'), pick(/back.*telephoto/i, 'Tele')].filter(Boolean);
+    CAM.lenses = lenses.length >= 2 ? lenses : [];
+    if (CAM.lenses.length && !CAM.deviceId) {
+      const cur = CAM.track && CAM.track.getSettings ? CAM.track.getSettings().deviceId : null;
+      CAM.deviceId = (CAM.lenses.find(l => l.id === cur) || CAM.lenses.find(l => l.label === '1×') || CAM.lenses[0]).id;
+    }
+  } catch (_) { CAM.lenses = []; }
+}
+function camCaps() {
+  const caps = CAM.track && CAM.track.getCapabilities ? CAM.track.getCapabilities() : {};
+  const torch = $('[data-cam="torch"]', CAM.el); torch.hidden = !caps.torch; CAM.torch = false; torch.setAttribute('aria-pressed', 'false');
+  const z = $('.cam-zoom', CAM.el);
+  if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+    z.min = caps.zoom.min; z.max = Math.min(caps.zoom.max, 10); z.step = caps.zoom.step || 0.1;
+    z.value = (CAM.track.getSettings().zoom || caps.zoom.min); z.hidden = false;
+  } else z.hidden = true;
+  const L = $('.cam-lenses', CAM.el);
+  L.hidden = !CAM.lenses.length;
+  L.innerHTML = CAM.lenses.map(l => `<button data-cam="lens" data-id="${esc(l.id)}" aria-pressed="${l.id === CAM.deviceId}">${l.label}</button>`).join('');
+  const st = CAM.track.getSettings ? CAM.track.getSettings() : {};
+  $('.cam-res', CAM.el).textContent = st.width && st.height ? `${Math.max(st.width, st.height)}×${Math.min(st.width, st.height)}${CAM.mode === 'video' ? ' · ' + (VQ[S.settings.vidQ] || VQ['1080']).label : ''}` : '';
+}
+function setZoom(v) { if (CAM.track) CAM.track.applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {}); }
+function camUpdate() {
+  if (!CAM.el) return;
+  const n = batch ? batch.photos.length : 0, N = batchSize();
+  $('.cam-count', CAM.el).textContent = `${n} of ${N}`;
+  CAM.el.querySelectorAll('[data-cam="mode"]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === CAM.mode));
+  CAM.el.classList.toggle('is-video', CAM.mode === 'video');
+  CAM.el.classList.toggle('is-rec', !!CAM.rec);
+  $('[data-cam="shoot"]', CAM.el).setAttribute('aria-label', CAM.mode === 'video' ? (CAM.rec ? 'Stop recording' : 'Start recording') : 'Take photo');
+  const last = batch && batch.photos[batch.photos.length - 1];
+  const lb = $('.cam-last', CAM.el);
+  if (last) { thumbSrc(last.id).then(u => { if (u) lb.style.backgroundImage = `url("${u}")`; }); lb.textContent = n; } else { lb.style.backgroundImage = ''; lb.textContent = ''; }
+  const recOn = !!CAM.rec;
+  CAM.el.querySelectorAll('[data-cam="mode"],[data-cam="lens"],[data-cam="native"],[data-cam="done"]').forEach(x => x.disabled = false);
+  CAM.el.querySelectorAll('[data-cam="mode"],[data-cam="lens"],[data-cam="native"]').forEach(x => x.disabled = recOn);
+  if (recOn) CAM.el.querySelectorAll('.stepper button').forEach(x => x.disabled = true); else setBatchButtons();
+}
+function setBatchButtons() {
+  CAM.el.querySelectorAll('[data-bs="-1"]').forEach(b => b.disabled = batchSize() <= 1);
+  CAM.el.querySelectorAll('[data-bs="1"]').forEach(b => b.disabled = batchSize() >= 10);
+}
+function camMsg(html, withActions) {
+  const m = $('.cam-msg', CAM.el); if (!m) return;
+  if (!html) { m.hidden = true; m.innerHTML = ''; return; }
+  m.hidden = false;
+  m.innerHTML = `<p>${html}</p>${withActions ? '<div class="cam-msg-acts"><button class="cam-pill" data-cam="retry">Try again</button><button class="cam-pill" data-cam="native">Use iPhone camera</button></div>' : ''}`;
+}
+async function onCamClick(e) {
+  const b = e.target.closest('[data-cam]'); if (!b || b.disabled) return;
+  const a = b.dataset.cam;
+  if (a === 'shoot') return CAM.mode === 'video' ? toggleRecord() : snapPhoto();
+  if (a === 'done') return closeCamera(true);
+  if (a === 'retry') return startStream();
+  if (a === 'mode') { if (b.dataset.v === CAM.mode || CAM.rec) return; if (b.dataset.v === 'video' && !pickRecMime()) { toast('Video recording isn’t supported here — use the iPhone camera'); return; } CAM.mode = b.dataset.v; camUpdate(); return startStream(); }
+  if (a === 'lens') { if (CAM.rec || b.dataset.id === CAM.deviceId) return; CAM.deviceId = b.dataset.id; return startStream(); }
+  if (a === 'torch') { CAM.torch = !CAM.torch; b.setAttribute('aria-pressed', CAM.torch); CAM.track.applyConstraints({ advanced: [{ torch: CAM.torch }] }).catch(() => toast('Flashlight not available')); return; }
+  if (a === 'native') {
+    S.settings.camera = 'native'; await saveSettings();
+    await closeCamera(false); toast('Switched to the iPhone camera (change it in Settings)');
+    pendingCapture = { defectId: batch ? batch.defectId : null }; const inp = $('#cam-input'); inp.value = ''; inp.click();
+    return;
+  }
+  if (a === 'last') { if (batch && batch.photos.length) toast(`${batch.photos.length} captured in this batch — tap Done to link them`); }
+}
+function flash() { const f = $('.cam-flash', CAM.el); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }
+async function snapPhoto() {
+  if (CAM.busy || !CAM.track) return;
+  const v = $('.cam-view', CAM.el); if (!v.videoWidth) return;
+  CAM.busy = true; flash();
+  try {
+    const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+    await camSave(new File([blob], 'capture.jpg', { type: 'image/jpeg' }));
+  } finally { CAM.busy = false; }
+}
+function toggleRecord() {
+  if (CAM.rec) { CAM.rec.stop(); return; }
+  if (!CAM.stream) return;
+  const mime = pickRecMime();
+  let rec;
+  try { rec = new MediaRecorder(CAM.stream, { mimeType: mime, videoBitsPerSecond: (VQ[S.settings.vidQ] || VQ['1080']).bps }); }
+  catch (_) { try { rec = new MediaRecorder(CAM.stream); } catch (e) { toast('Can’t record video here'); return; } }
+  CAM.chunks = []; CAM.rec = rec; CAM.recStart = Date.now();
+  rec.ondataavailable = e => { if (e.data && e.data.size) CAM.chunks.push(e.data); };
+  rec.onstop = async () => {
+    clearInterval(CAM.recTimer); CAM.rec = null;
+    const type = (rec.mimeType || mime || 'video/mp4').split(';')[0];
+    const blob = new Blob(CAM.chunks, { type }); CAM.chunks = [];
+    if (CAM.el) { $('.cam-rec', CAM.el).hidden = true; camUpdate(); }
+    if (blob.size) await camSave(new File([blob], 'video.' + (/webm/.test(type) ? 'webm' : 'mp4'), { type }));
+    if (CAM._afterStop) { const f = CAM._afterStop; CAM._afterStop = null; f(); }
+  };
+  rec.start(1000);
+  const r = $('.cam-rec', CAM.el); r.hidden = false;
+  const tick = () => {
+    const sec = Math.floor((Date.now() - CAM.recStart) / 1000);
+    $('.t', r).textContent = `${Math.floor(sec / 60)}:${pad(sec % 60, 2)}${sec >= REC_MAX_SEC - 30 ? ' · stops at 5:00' : ''}`;
+    if (sec >= REC_MAX_SEC && CAM.rec) CAM.rec.stop();
+  };
+  tick(); CAM.recTimer = setInterval(tick, 500);
+  camUpdate();
+}
+async function camSave(file) {
+  if (!batch) batch = { defectId: null, photos: [] };
+  const added = await addPhotos([file], batch.defectId);
+  if (!added.length) return;
+  batch.photos.push(...added);
+  render(); camUpdate();
+  if (batch.photos.length >= batchSize()) { await closeCamera(false); finishBatch(); }
+}
+function stopTracks() {
+  if (CAM.stream) CAM.stream.getTracks().forEach(t => t.stop());
+  CAM.stream = null; CAM.track = null;
+}
+function closeCamera(finish) {
+  return new Promise(res => {
+    const done = () => {
+      stopTracks(); clearInterval(CAM.recTimer);
+      if (CAM.el) { CAM.el.remove(); CAM.el = null; }
+      document.documentElement.classList.remove('cam-open');
+      document.removeEventListener('batchchange', camUpdate);
+      document.removeEventListener('visibilitychange', camVisibility);
+      if (finish) finishBatch();
+      res();
+    };
+    if (CAM.rec) { CAM._afterStop = done; CAM.rec.stop(); } else done();
+  });
+}
+function camVisibility() {
+  if (!CAM.el) return;
+  if (document.hidden) { if (CAM.rec) CAM.rec.stop(); stopTracks(); }
+  else startStream();
 }
 
 /* ================= Sheets (modal bottom panels) ================= */
@@ -1049,6 +1279,7 @@ function openMenu() {
     body: `<ul class="list">
       <li><button id="m-proj"><span>Projects<span class="sub">${S.projects.length} on this phone · switch, import, update lists</span></span><span class="meta">›</span></button></li>
       <li><button id="m-lib"><span>Add photos &amp; videos from library<span class="sub">Import photos or videos you took with the Camera app into ${esc(S.project.state.unit || 'the current unit')}</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-cam"><span>Camera: ${S.settings.camera === 'builtin' ? 'Built-in (trial)' : 'iPhone camera'}<span class="sub">Tap to switch to ${S.settings.camera === 'builtin' ? 'the iPhone camera' : 'the built-in camera'}</span></span><span class="meta">⇄</span></button></li>
       <li><button id="m-lists"><span>Edit lists<span class="sub">Add units, components and conditions · delete ones added on site</span></span><span class="meta">›</span></button></li>
       <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
       <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
@@ -1058,6 +1289,7 @@ function openMenu() {
       $('#m-proj', el).onclick = () => { close(); openProjects(); };
       $('#m-lib', el).onclick = () => { close(); fromLibrary(); };
       $('#m-lists', el).onclick = () => { close(); editListsSheet(); };
+      $('#m-cam', el).onclick = async () => { S.settings.camera = S.settings.camera === 'builtin' ? 'native' : 'builtin'; await saveSettings(); close(); toast(S.settings.camera === 'builtin' ? 'Camera: built-in (trial)' : 'Camera: iPhone camera'); };
       $('#m-export', el).onclick = () => { close(); openExport(); };
       $('#m-set', el).onclick = () => { close(); openSettings(); };
       $('#m-tpl', el).onclick = () => { close(); downloadTemplate(); };
@@ -1103,6 +1335,11 @@ async function openSettings() {
   openSheet({
     title: 'Settings',
     body: `<div class="field"><label for="s-ini">Your initials</label><input id="s-ini" value="${esc(S.settings.initials)}" maxlength="5" autocapitalize="characters"><span class="hint">Used in new photo names. Existing photos keep their names.</span></div>
+      <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
+        <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video) — trial</option></select>
+        <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
+      <div class="field"><label for="s-vq">Built-in camera video quality</label><select id="s-vq">
+        <option value="1080">1080p · about 90 MB per minute</option><option value="4k">4K · about 190 MB per minute</option></select></div>
       <div class="field"><label for="s-max">Photo size</label><select id="s-max">
         <option value="0">Full resolution (largest files)</option><option value="3000">Large · 3000 px</option><option value="2000">Medium · 2000 px (about ¼ the storage)</option></select>
         <span class="hint">Applies to new photos (videos are always kept as recorded), to both the original and the renamed copy. The phone stores each photo once; the two copies are made when you export.</span></div>
@@ -1126,11 +1363,13 @@ async function openSettings() {
         await txDone(t); busy(null); close(); render(); toast(`Removed ${freeable.length} photos · ${mb(freeMB)} freed`);
       };
       $('#s-max', el).value = String(S.settings.photoMax || 0);
+      $('#s-cam', el).value = S.settings.camera || 'native';
+      $('#s-vq', el).value = S.settings.vidQ || '1080';
       $('#s-part', el).value = String(S.settings.partMB || 250);
       $('#s-save', el).onclick = async () => {
         const v = $('#s-ini', el).value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!v) { toast('Initials can’t be empty'); return; }
-        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.partMB = +$('#s-part', el).value;
+        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value;
         await saveSettings(); close(); render(); toast('Settings saved');
       };
     }
