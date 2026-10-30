@@ -1,11 +1,12 @@
 // Site Defects service worker.
 // Online: always fetches the newest app files from the server (so updates arrive on the next open).
 // Offline or very weak signal: serves the copy saved on the phone.
-const VERSION = 'site-defects-v1.7.5';
+const VERSION = 'site-defects-v1.8.0';
 const FILES = [
   './',
   'index.html',
   'app.css',
+  'sheets.js',
   'app.js',
   'manifest.webmanifest',
   'xlsx.full.min.js',

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Site Defects – Combine</title>
+<meta name="app-version" content="1.8.0">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root { --ink: #15201C; --muted: #5C6964; --line: #CDD5D1; --paper: #F3F5F4; --card: #fff; --accent: #2C6BED; --red: #C8102E; --green: #1E7B4A; --amber: #C77700; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  header { background: var(--ink); color: #fff; padding: 18px 24px; }
+  header h1 { margin: 0; font-size: 22px; } header p { margin: 4px 0 0; color: #B9C4BF; font-size: 14px; }
+  main { max-width: 880px; margin: 0 auto; padding: 20px 16px 60px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+  .card h2 { margin: 0 0 6px; font-size: 17px; display: flex; gap: 10px; align-items: center; }
+  .num { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--ink); color: #fff; font-size: 14px; flex: none; }
+  .note { color: var(--muted); font-size: 14px; margin: 4px 0 10px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .chosen { font-family: Consolas, monospace; font-size: 14px; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-width: 220px; }
+  .chosen.empty { color: var(--muted); font-family: inherit; }
+  button { font: inherit; border-radius: 9px; border: 1px solid var(--line); background: #fff; padding: 8px 14px; cursor: pointer; }
+  button.primary { background: var(--ink); color: #fff; border-color: var(--ink); font-weight: 600; padding: 11px 20px; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.link { border: 0; background: none; color: var(--accent); padding: 0 4px; }
+  #bar { height: 8px; background: var(--paper); border-radius: 4px; overflow: hidden; margin: 12px 0 6px; }
+  #bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #status { font-weight: 600; }
+  #log { font-family: Consolas, monospace; font-size: 13px; background: #0E1412; color: #E8EEEB; border-radius: 10px; padding: 12px 14px; max-height: 420px; overflow: auto; white-space: pre-wrap; margin-top: 10px; }
+  #log .ok { color: #7BD89B; } #log .warn { color: #F2C14E; } #log .err { color: #FF7A85; } #log .h { color: #9EC1FF; font-weight: bold; }
+  .unsupported { background: #FFF2CC; border-color: #BF9000; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header><h1>Site Defects – Combine</h1><p>Combines everyone’s export ZIPs into one project folder and builds the combined project spreadsheet. Everything happens on this computer; nothing is uploaded.</p></header>
+<main>
+  <div class="card unsupported hidden" id="unsupported"><b>Open this page in Microsoft Edge or Google Chrome on a Windows PC.</b> It needs permission to read and write folders, which other browsers (and phones) don’t offer.</div>
+
+  <div class="card">
+    <h2><span class="num">1</span> Folder with the new ZIPs <span class="note">(optional)</span></h2>
+    <p class="note">The folder you copied the export ZIPs into (from USB drives, OneDrive or email). ZIPs already combined are skipped quickly. Leave empty to just rebuild the combined spreadsheet, for example after resolving conflicts.</p>
+    <div class="row"><span class="chosen empty" id="zipName">Not chosen</span><button id="zipPick">Choose…</button><button class="link hidden" id="zipClear">Clear</button></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">2</span> Where the combined project folder lives</h2>
+    <p class="note">The folder that holds (or will hold) the project folder, for example <b>I:\Projects\267180.00</b> or <b>C:\Inspections</b>. The project folder “267180.00 Inspection” is created inside it. Always use the same place for a project.</p>
+    <div class="row"><span class="chosen empty" id="destName">Not chosen</span><button id="destPick">Choose…</button></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">3</span> Also copy the receipt to <span class="note">(optional)</span></h2>
+    <p class="note">A shared OneDrive or Teams folder the inspectors can open on their iPhones, so they can load the latest receipt themselves (Menu → Load PC receipt) without anyone sending it.</p>
+    <div class="row"><span class="chosen empty" id="rcptName">Not chosen</span><button id="rcptPick">Choose…</button><button class="link hidden" id="rcptClear">Clear</button></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><button class="primary" id="go" disabled>Combine</button><span id="status"></span></div>
+    <div id="bar"><span></span></div>
+    <p class="note">Close the combined spreadsheet in Excel before you start. Keep this tab open until it says Done.</p>
+    <div id="log" class="hidden"></div>
+  </div>
+</main>
+<script src="xlsx-style.min.js"></script>
+<script src="sheets.js"></script>
+<script src="combine.js"></script>
+</body>
+</html>

@@ -58,23 +58,49 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
    - A single video bigger than the ZIP part size goes into a ZIP part of its own.
    - **Defective, no photo:** if any condition is marked 1 with no photo, the Export panel says how many. Tap it for the list; tap a row to go straight to that unit, component and condition. A bar at the bottom then shows **No photo: 1 of 5** with **Next ›** to step through the rest. The same list is in **Menu → Defective, no photo**.
 
-## Combining exports on the PC
+## Combining exports on the PC: the Combine page
 
-`Combine Site Defects exports.cmd` puts every export, from every inspector, into one folder per project, so you don't end up with many folders that each hold a few photos.
+**https://jmoberlychan.github.io/site-forms/combine.html**, opened in **Microsoft Edge or Google Chrome** on the PC, combines every inspector's exports into one folder per project and builds the **combined project spreadsheet**. It runs entirely on the PC: the page reads and writes the folders you choose, and nothing is uploaded.
 
-1. Collect everyone's export ZIPs in one folder on the PC (for example a project folder in Downloads).
-2. Put `Combine Site Defects exports.cmd` in that folder and double-click it. (You can also drag ZIPs onto it.) The first time, Windows may say it protected your PC: click **More info → Run anyway**.
-3. Press Enter to combine into `C:\Inspections`, or type another folder. Each project gets one folder, for example `C:\Inspections\267180.00 Inspection`, with one `Photos\Unit\Component` tree. Files already there are skipped. Photos are never overwritten: if two different photos have the same name, both are kept. A spreadsheet is replaced only by a newer export of the same spreadsheet.
-4. The newest spreadsheet for each inspector is kept beside the Photos folder; older ones are removed from that folder (they're still inside the original ZIPs). The spreadsheet's photo links open from there.
-5. The tool writes a **receipt** in the project's `Receipts` folder and opens it in Explorer. Send it to each inspector by email, Teams or AirDrop.
+1. Copy everyone's export ZIPs (and any spreadsheet-only exports, `… Defects.xlsx`) into one incoming folder on the PC, for example `C:\Inspections\Incoming`.
+2. **Close the combined spreadsheet in Excel** if it's open.
+3. Open the Combine page and choose:
+   - **Folder with the new ZIPs:** the incoming folder (optional; leave it empty to just rebuild the combined spreadsheet, for example after resolving conflicts).
+   - **Where the combined project folder lives:** the folder that holds the project folder, for example `I:\Projects\267180.00` or `C:\Inspections`. `267180.00 Inspection` is created inside it. **Always use the same place for a project.**
+   - **Also copy the receipt to (optional):** a shared OneDrive or Teams folder, so inspectors can load the newest receipt themselves on their iPhones.
 
-Run it as often as you like: each run adds only what's new, and its receipt covers everything in the folder.
+   The page remembers these folders. The first time, and occasionally afterwards, Edge asks for permission to view and save changes in them: allow it.
+4. Click **Combine** and keep the tab open until it says **Done**.
+
+Each run:
+- Unpacks the ZIPs into one `Photos\Unit\Component` tree (plus `Unsorted`, if exported). Files already there are skipped; photos are never overwritten (if two different photos have the same name, both are kept).
+- Keeps the newest spreadsheet for each inspector beside the Photos folder and removes their older ones (they're still inside the original ZIPs). Spreadsheet-only exports (`.xlsx`) are filed the same way, even if they were renamed.
+- Rebuilds `<Project#> Combined Defects.xlsx` from scratch from each inspector's newest spreadsheet.
+- Writes a **receipt** listing every photo in the project folder (in `Receipts`, and in the optional shared folder).
+
+Run it whenever ZIPs arrive, as often as you like: you don't need everyone's ZIPs first. Spreadsheets exported before app version 1.8.0 can't be combined (they lack the data the page reads); export again from 1.8.0.
+
+`Combine Site Defects exports.cmd` (double-click) still works as a backup for unpacking ZIPs and writing the receipt, but it doesn't build the combined spreadsheet.
+
+## The combined project spreadsheet
+
+- **Same sheets as an inspector's spreadsheet** (Unit Matrix, Summary, Observations, Photo Log, Change Log, About), built from every inspector's newest results, with photos from everyone linked to each condition. Observations shows who recorded what (`JJM: 1; ABC: 0`) and everyone's notes, prefixed with their initials.
+- **Conflicts:** where inspectors recorded different results for the same unit and condition, the result is left **blank** and the cell is **highlighted** (yellow with a red border) in the Unit Matrix and Observations. The Summary has an **Unresolved conflicts** column, so totals never count a disputed result.
+- **Conflicts sheet:** one row per conflict: each inspector's result and time, everyone's notes, the photos, a **Go to cell** link to the highlighted cell, and a **Resolved result** column. To resolve, type **1, 0, NA or NR** in Resolved result, save, and run Combine again (no ZIPs needed): the result goes into the Unit Matrix, highlighted green. Resolutions are kept on every later run. If an inspector later changes one of the disputed results, the conflict is raised again, with a note.
+- **Don't edit results directly in the combined spreadsheet**: it's rebuilt on every run. Change results in the app, or resolve conflicts on the Conflicts sheet.
+- **Change Log:** every inspector's change log merged, newest first. Changed and Removed entries are highlighted. Filter on **Change** to see only those.
+
+## Change log in each inspector's spreadsheet
+
+Each time a spreadsheet is exported, the app compares every result, note and photo link with the previous spreadsheet export and adds what's different to the **Change Log** sheet: when, inspector, unit, component, condition, what (Result, Note or Photo), the change (**Added**, **Changed** or **Removed**), and the old and new values. The log is cumulative, so the newest spreadsheet carries the whole history. It's long but filterable. Changes made and undone between two exports don't appear.
 
 ## Clearing space on the phone automatically
 
-On the iPhone, save the receipt to Files, then in the app: **Menu → Load PC receipt**. The app checks each photo against the receipt: it counts as confirmed only if the PC has it in the same unit and component folder, with the same file size. Photos that aren't in the receipt (not exported yet, exported Unsorted only, or moved to another unit since) are never removed.
+On the iPhone, save the receipt to Files (or open it straight from the shared OneDrive folder), then in the app: **Menu → Load PC receipt**. Each receipt covers every photo combined so far, from all inspectors, so only the newest one matters. The app checks each photo against the receipt: it counts as confirmed only if the PC has it in the same unit and component folder, with the same file size. Photos that aren't in the receipt (not exported yet, exported Unsorted only, or moved to another unit since) are never removed.
 
 Confirmed photos are removed from the phone automatically once they're older than **Settings → Keep confirmed photos on the phone for** (3 days by default; it can be set to today only, 7 or 14 days, or never). If storage is over 80% full, confirmed photos older than today are removed sooner. Thumbnails, results, notes and links stay, so the spreadsheet is unchanged. The check runs whenever the app opens and whenever a receipt is loaded.
+
+If photos two or more days old still haven't been confirmed by a receipt, the app reminds you (once a day) to export them and get them combined.
 
 ## Screen zoom
 
@@ -98,6 +124,7 @@ The number restarts at 0001 each day for each inspector. The date is included so
 - **Summary:** for each condition, Defective (1), Observed (1+0), % defective, NA, NR and not-yet-recorded. These are live formulas. They count by each condition's ID (in the hidden Condition ID column), so names with symbols such as `>` or `*`, or two conditions with the same name, are counted correctly.
 - **Observations:** one row per unit and condition, with notes and a link to every proof photo. It is filterable.
 - **Photo Log:** every photo, with its unit, component and the conditions it proves.
+- **Change Log:** what changed between this inspector's spreadsheet exports (see below).
 
 ## Updating the defect list mid-project
 
@@ -122,12 +149,12 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, …). Each folder holds all 10 app files plus `VERSION.txt` describing what changed (from 1.7.1, also the PC combine tool).
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
 
-To go back to a version, upload **all 10 files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
+To go back to a version, upload **all the files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 
 ## Updating the app
 
-When the app code changes, upload **all** the changed files together, at the top level of the repository (not inside a folder). Each version has a matching number in three places: `APP_VERSION` in `app.js`, `VERSION` in `sw.js`, and `app-version` in `index.html`.
+When the app code changes, upload **all** the changed files together, at the top level of the repository (not inside a folder). Each version has a matching number in four places: `APP_VERSION` in `app.js`, `VERSION` in `sw.js`, and `app-version` in `index.html` and `combine.html`.
 
 From version 1.3.2 on, a phone with a connection picks up a new version automatically. From 1.7.0, the app only reloads by itself in the first few seconds after opening. If an update arrives later, while you're working, a blue **Update ready — tap to restart** bar appears instead, so a camera, a note or an export is never interrupted. If the files on GitHub don't match each other (for example, one was missed in an upload), **Menu** shows a warning next to the version number. Phones pick up the update the next time the app is opened with a connection.

@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.7.5';
+const APP_VERSION = '1.8.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -2258,6 +2258,7 @@ function openProjects() {
         for (const o of S.obs.values()) t.objectStore('obs').delete(o.key);
         for (const ph of S.photos) { t.objectStore('photos').delete(ph.id); t.objectStore('blobs').delete(ph.id); t.objectStore('thumbs').delete(ph.id); }
         await txDone(t);
+        await del('meta', 'snap|' + p.id); await del('meta', 'log|' + p.id);   // change-log baseline goes with the project
         S.projects = S.projects.filter(x => x.id !== p.id);
         await activate(S.projects[0] || null); busy(null); close(); render();
       };
@@ -2333,187 +2334,46 @@ async function openSettings() {
 }
 
 /* ================= Export ================= */
-function linkTarget(path) { return encodeURI(path); }
-function hyperlink(text, target) { return { t: 's', v: text, l: { Target: linkTarget(target), Tooltip: 'Open photo' } }; }
-function colName(n) { let s = ''; n++; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
-function cellVal(v) { return v === '1' ? 1 : v === '0' ? 0 : v; }
-// Excel refuses text longer than 32,767 characters in a cell (one long note used to make every export fail).
-const CELL_MAX = 32000;
-function capText(t) { return typeof t === 'string' && t.length > CELL_MAX ? t.slice(0, CELL_MAX) + '… (truncated)' : t; }
-function capCells(rows) {
-  for (const r of rows) for (let i = 0; i < r.length; i++) {
-    const c = r[i];
-    if (typeof c === 'string') r[i] = capText(c);
-    else if (c && typeof c === 'object' && typeof c.v === 'string') c.v = capText(c.v);
-  }
-  return rows;
-}
-// Excel ScreenTips stop at 255 characters.
-function tipList(names) {
-  let out = '';
-  for (let i = 0; i < names.length; i++) {
-    const more = names.length - i, add = (out ? ', ' : '') + names[i];
-    if ((out + add).length > 238 && more > 0) return out + ` +${more} more`;
-    out += add;
-  }
-  return out;
-}
-
-function buildWorkbook() {
+// The spreadsheet itself is built by sheets.js (shared with the PC Combine page).
+// This turns the app's data into that model, and keeps the change log between spreadsheet exports.
+function photoRef(x) { return { name: x.name, path: photoPath(x) }; }
+function appModelParts() {
   const p = S.project;
-  const wb = XLSX.utils.book_new();
-  const allObs = [...S.obs.values()].filter(o => o.value || (o.notes && o.notes.trim()) || o.photoIds.length);
-  const unitOrder = new Map(p.units.map((u, i) => [u.label, i]));
-  const defOrder = new Map(p.defects.map((d, i) => [d.id, i]));
-  const compOrder = new Map(p.components.map((c, i) => [c, i]));
-  allObs.sort((a, b) => (unitOrder.get(a.unit) ?? 1e9) - (unitOrder.get(b.unit) ?? 1e9)
-    || (compOrder.get(a.component) ?? 1e9) - (compOrder.get(b.component) ?? 1e9)
-    || isGeneral(a.defectId) - isGeneral(b.defectId)
-    || (defOrder.get(a.defectId) ?? 1e9) - (defOrder.get(b.defectId) ?? 1e9));
-  const maxPh = Math.max(1, ...allObs.map(o => o.photoIds.filter(photoById).length));
-
-  /* --- Observations --- */
-  const head = ['Unit', 'Component', 'Code', 'Defect condition', 'Result', 'Notes', 'Photo count'];
-  for (let i = 1; i <= maxPh; i++) head.push('Photo ' + i);
-  head.push('Inspector', 'Last updated', 'Condition ID');   // Condition ID: what the Summary formulas count by
-  const idCol = colName(head.length - 1);
-  const rows = [head];
-  for (const o of allObs) {
-    const d = isGeneral(o.defectId) ? { label: 'General notes', code: '' } : (defectById(o.defectId) || { label: o.defectId + ' (removed from list)', code: '' });
-    const phs = o.photoIds.map(photoById).filter(Boolean);
-    const r = [o.unit, o.component, d.code || '', d.label, cellVal(o.value || ''), o.notes || '', phs.length];
-    for (let i = 0; i < maxPh; i++) r.push(phs[i] ? hyperlink(phs[i].name, photoPath(phs[i])) : '');
-    r.push(o.inspector || '', new Date(o.updatedAt), o.defectId);
-    rows.push(r);
-  }
-  capCells(rows);
-  const wsO = XLSX.utils.aoa_to_sheet(rows, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsO['!cols'] = [{ wch: 14 }, { wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 8 }, { wch: 40 }, { wch: 7 }, ...Array(maxPh).fill({ wch: 30 }), { wch: 9 }, { wch: 17 }, { wch: 30 }];
-  wsO['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(rows.length - 1, 1), c: head.length - 1 } }) };
-  const lastRow = rows.length;
-
-  /* --- Summary (live formulas against Observations) --- */
-  // Counted by Condition ID (column K, hidden), never by name: names like ">1/8 in.", "Crack*" or two "Other"s
-  // would otherwise be read by Excel as comparisons, wildcards or the same condition.
-  const sRows = [['Component', 'Code', 'Defect condition', 'Defective (1)', 'Observed (1 + 0)', '% defective', 'NA', 'NR', 'Not yet recorded', 'Source', 'Condition ID']];
-  const range = c => `Observations!$${c}$2:$${c}$${Math.max(lastRow, 2)}`;
-  p.defects.forEach((d, i) => {
-    const r = i + 2;
-    const vals = allObs.filter(o => o.defectId === d.id);
-    const c1 = vals.filter(o => o.value === '1').length, c0 = vals.filter(o => o.value === '0').length;
-    const na = vals.filter(o => o.value === 'NA').length, nr = vals.filter(o => o.value === 'NR').length;
-    const base = `${range(idCol)},$K${r}`;
-    sRows.push([d.component, d.code || '', d.label,
-      { t: 'n', v: c1, f: `COUNTIFS(${base},${range('E')},1)` },
-      { t: 'n', v: c1 + c0, f: `COUNTIFS(${base},${range('E')},1)+COUNTIFS(${base},${range('E')},0)` },
-      { t: 'n', v: c1 + c0 ? c1 / (c1 + c0) : 0, f: `IF(E${r}=0,0,D${r}/E${r})`, z: '0%' },
-      { t: 'n', v: na, f: `COUNTIFS(${base},${range('E')},"NA")` },
-      { t: 'n', v: nr, f: `COUNTIFS(${base},${range('E')},"NR")` },
-      { t: 'n', v: p.units.length - (c1 + c0 + na + nr), f: `${p.units.length}-E${r}-G${r}-H${r}` },
-      d.added ? 'Added on site' : (d.orphan ? 'No longer in the import file' : 'Import file'), d.id]);
-  });
-  capCells(sRows);
-  const sr = sRows.length;
-  const tot = (col) => ({ t: 'n', v: 0, f: `SUM(${col}2:${col}${sr})` });
-  sRows.push(['All components', '', 'Total', tot('D'), tot('E'), { t: 'n', v: 0, f: `IF(E${sr + 1}=0,0,D${sr + 1}/E${sr + 1})`, z: '0%' }, tot('G'), tot('H'), tot('I')]);
-  // cached totals
-  const last = sRows[sRows.length - 1];
-  ['D', 'E', 'G', 'H', 'I'].forEach((c, k) => { const idx = [3, 4, 6, 7, 8][k]; last[idx].v = sRows.slice(1, -1).reduce((s, r) => s + r[idx].v, 0); });
-  last[5].v = last[4].v ? last[3].v / last[4].v : 0;
-  const wsS = XLSX.utils.aoa_to_sheet(sRows);
-  for (let r = 2; r <= sRows.length; r++) { const a = 'F' + r; if (wsS[a]) wsS[a].z = '0%'; }
-  wsS['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 44 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 6 }, { wch: 6 }, { wch: 14 }, { wch: 14 }, { wch: 30, hidden: true }];
-  wsS['!autofilter'] = { ref: `A1:J${sRows.length - 1}` };
-
-  /* --- Unit matrix (like the paper form) --- */
-  const defs = p.defects;
-  const r1 = ['Unit', 'Address / description', 'Schedule'], r2 = ['', '', ''];
-  const merges = [];
-  let col = 3;
-  for (const c of p.components) {
-    const ds = defs.filter(d => d.component === c); if (!ds.length) continue;
-    r1.push(c, ...Array(ds.length - 1).fill(''));
-    if (ds.length > 1) merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + ds.length - 1 } });
-    ds.forEach(d => r2.push((d.code ? d.code + ' ' + d.label : d.label) + (d.added ? ' (added on site)' : '')));
-    col += ds.length;
-  }
-  const orderedDefs = p.components.flatMap(c => defs.filter(d => d.component === c));
-  const firstC = 3, lastC = 3 + orderedDefs.length - 1;
-  r1.push('Defective (1)', 'Observed (1 + 0)', 'Photos'); r2.push('', '', '');
-  const mRows = [r1, r2];
-  p.units.forEach((u, ui) => {
-    const rr = ui + 3;
-    const row = [u.label, [u.desc, u.added ? '(added on site)' : ''].filter(Boolean).join(' '), u.sched != null ? (u.schedLabel && u.schedLabel !== 'added' ? u.schedLabel : 'Yes') : ''];
-    let c1 = 0, c10 = 0, nph = 0;
-    for (const d of orderedDefs) {
-      const o = getObs(u.label, d.id);
-      const v = o ? o.value : '';
-      const ph = o ? o.photoIds.map(photoById).filter(Boolean) : [];
-      nph += ph.length;
-      if (v === '1') c1++; if (v === '1' || v === '0') c10++;
-      if (v && ph.length) row.push({ ...(v === '1' || v === '0' ? { t: 'n', v: +v } : { t: 's', v }), l: { Target: linkTarget(photoPath(ph[0])), Tooltip: tipList(ph.map(x => x.name)) } });
-      else row.push(cellVal(v));
-    }
-    const rg = `${colName(firstC)}${rr}:${colName(lastC)}${rr}`;
-    row.push({ t: 'n', v: c1, f: `COUNTIF(${rg},1)` }, { t: 'n', v: c10, f: `COUNTIF(${rg},1)+COUNTIF(${rg},0)` }, nph);
-    mRows.push(row);
-  });
-  const endU = p.units.length + 2;
-  const totD = ['Defective (1)', '', ''], totO = ['Observed (1 + 0)', '', ''], totP = ['% defective', '', ''];
-  orderedDefs.forEach((d, i) => {
-    const cl = colName(firstC + i); const rg = `${cl}3:${cl}${endU}`;
-    const vals = p.units.map(u => (getObs(u.label, d.id) || {}).value);
-    const a = vals.filter(v => v === '1').length, b = a + vals.filter(v => v === '0').length;
-    totD.push({ t: 'n', v: a, f: `COUNTIF(${rg},1)` });
-    totO.push({ t: 'n', v: b, f: `COUNTIF(${rg},1)+COUNTIF(${rg},0)` });
-    totP.push({ t: 'n', v: b ? a / b : 0, f: `IF(${cl}${endU + 2}=0,0,${cl}${endU + 1}/${cl}${endU + 2})`, z: '0%' });
-  });
-  mRows.push(totD, totO, totP);
-  const wsM = XLSX.utils.aoa_to_sheet(capCells(mRows));
-  wsM['!merges'] = merges;
-  wsM['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 10 }, ...orderedDefs.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 14 }, { wch: 8 }];
-  orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
-
-  /* --- Photo log --- */
-  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during', 'Moved from unit']];
-  const sortedPh = [...S.photos].sort((a, b) => a.takenAt - b.takenAt);
-  for (const ph of sortedPh) {
-    const ds = ph.defectIds.map(defectById).filter(Boolean);
-    pRows.push([hyperlink(ph.name, photoPath(ph)), isVideo(ph) ? 'Video' : 'Photo', origNameOf(ph), ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
-      ds.map(d => (getObs(ph.unit, d.id) || {}).value || '–').join('; '), new Date(ph.takenAt), ph.initials, photoPath(ph).replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '']);
-  }
-  const wsP = XLSX.utils.aoa_to_sheet(capCells(pRows), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }, { wch: 14 }];
-  wsP['!autofilter'] = { ref: `A1:L${Math.max(pRows.length, 2)}` };
-
-  /* --- About --- */
-  const info = [
-    ['Project number', p.number], ['Project name', p.name || ''], ['Exported', new Date()], ['Exported by', S.settings.initials],
-    ['Units', p.units.length], ['Defect conditions', p.defects.length], ['Photos', S.photos.length], [],
-    ['How to read this workbook'],
-    ['Unit Matrix', 'Same layout as the paper form: units down the side, conditions across the top. Click a 1 or 0 to open its first proof photo.'],
-    ['Summary', 'Per condition: defective count (1), observed count (1 + 0), % defective, NA and NR. Formulas update if you edit Observations.'],
-    ['Observations', 'One row per unit and condition with notes and links to every proof photo. Filter by unit, component or result.'],
-    ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
-    ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
-    ['Unzipping', 'Use the PC combine tool (Combine Site Defects exports.cmd): it unpacks every export ZIP, from every inspector, into one folder per project (C:\\Inspections\\<project> Inspection) and keeps only the newest spreadsheet per inspector. By hand: extract every ZIP into the SAME folder, close to C:\\. Windows "Extract All" makes a new folder per ZIP by default, which breaks links to photos from earlier exports.'],
-    ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component.'],
-    ['Unsorted folder', 'Every photo in one place, not sorted by unit: “Original names” has the photos under their original file names, “Renamed” has the same photos under their new names. The Photo Log matches each original to its renamed copy.'],
-    ['Schedule', 'Units marked in the Schedule column of the Unit Matrix were on the visit schedule from the import file.'],
-    ['Added on site', 'Units and conditions marked “added on site” were added in the app rather than coming from the import file.'],
-    ['Results', '1 = defective, 0 = not defective, NA = condition doesn’t exist at the unit, NR = not able to be recorded.'],
-  ];
-  const wsI = XLSX.utils.aoa_to_sheet(capCells(info), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' }); wsI['!cols'] = [{ wch: 20 }, { wch: 100 }];
-
-  XLSX.utils.book_append_sheet(wb, wsM, 'Unit Matrix');
-  XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
-  XLSX.utils.book_append_sheet(wb, wsO, 'Observations');
-  XLSX.utils.book_append_sheet(wb, wsP, 'Photo Log');
-  XLSX.utils.book_append_sheet(wb, wsI, 'About');
-  return wb;
+  const obs = [...S.obs.values()].map(o => ({ unit: o.unit, defectId: o.defectId, component: o.component, general: isGeneral(o.defectId),
+    value: o.value || '', notes: o.notes || '', photos: (o.photoIds || []).map(photoById).filter(Boolean).map(photoRef),
+    inspector: o.inspector || '', updatedAt: o.updatedAt || 0 }));
+  const photos = S.photos.map(x => ({ name: x.name, path: photoPath(x), kind: x.kind || 'photo', origName: origNameOf(x), unit: x.unit, component: x.component,
+    defectIds: x.defectIds || [], takenAt: x.takenAt, initials: x.initials || '', takenDuring: x.takenDuring || '', movedFrom: x.movedFrom || '', size: x.size || 0 }));
+  const project = { number: p.number, name: p.name || '', units: p.units, components: p.components, defects: p.defects };
+  return { project, obs, photos };
 }
-function workbookBlob() {
-  const out = XLSX.write(buildWorkbook(), { bookType: 'xlsx', type: 'array', compression: true });
+// What each unit + condition looks like right now (only ones with something recorded).
+function snapshotOf(obs) {
+  const snap = {};
+  for (const o of obs) {
+    if (!(o.value || (o.notes && o.notes.trim()) || o.photos.length)) continue;
+    snap[o.unit + '|' + o.defectId] = { v: o.value || '', n: o.notes || '', ph: o.photos.map(x => x.name), comp: o.component };
+  }
+  return snap;
+}
+function describeCondition(defectId, comp) {
+  if (isGeneral(defectId)) return { component: comp || String(defectId).split('::')[1] || '', code: '', label: 'General notes' };
+  const d = defectById(defectId);
+  return d ? { component: d.component, code: d.code || '', label: d.label } : { component: comp || '', code: '', label: defectId };
+}
+async function workbookBlob() {
+  const p = S.project, now = Date.now(), by = S.settings.initials || '';
+  const parts = appModelParts();
+  const cur = snapshotOf(parts.obs);
+  const prevRec = await get('meta', 'snap|' + p.id), logRec = await get('meta', 'log|' + p.id);
+  const added = diffSnapshots(prevRec ? prevRec.snap : {}, cur, { at: now, by, describe: describeCondition });
+  const log = [...(logRec ? logRec.log : []), ...added];
+  const data = { type: 'site-defects-inspector', v: 1, app: APP_VERSION, exportedAt: now, inspector: by, ...parts, log };
+  const wb = buildWorkbookFromModel({ ...parts, changeLog: log, meta: { exportedAt: now, exportedBy: by, combined: false }, data });
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
+  // only once the spreadsheet is built: this export becomes the baseline for the next one
+  await put('meta', { k: 'snap|' + p.id, snap: cur, at: now });
+  await put('meta', { k: 'log|' + p.id, log });
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
@@ -2631,7 +2491,7 @@ async function exportRun({ photos, copies, withXls }) {
   let xblob = null;
   if (withXls) {
     busy('Building spreadsheet…');
-    try { xblob = workbookBlob(); } catch (e) { busy(null); alertSheet('Export failed', String(e.message || e)); return; }
+    try { xblob = await workbookBlob(); } catch (e) { busy(null); alertSheet('Export failed', String(e.message || e)); return; }
     busy(null);
     if (!photos.length) { shareStep([{ file: new File([xblob], xname, { type: xblob.type }), photos: [] }]); return; }
   }
@@ -2903,4 +2763,17 @@ function showBrowserBanner() {
 }
 showBrowserBanner();
 
-loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); setTimeout(() => autoClean().catch(() => {}), 1500); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
+// Photos 2+ days old that no PC receipt has confirmed yet: remind once a day, so they're sent before the phone fills up.
+async function unconfirmedReminder() {
+  const today = dateKey(Date.now());
+  if (S.settings.unconfWarnDay === today) return;
+  const sod = new Date(); sod.setHours(0, 0, 0, 0);
+  const cutoff = sod.getTime() - 2 * 86400000 + 86400000;   // taken before yesterday
+  const old = (await getAll('photos')).filter(p => !p.removed && !isConfirmed(p) && p.takenAt < cutoff);
+  if (!old.length) return;
+  S.settings.unconfWarnDay = today; await saveSettings();
+  const bytes = old.reduce((s, p) => s + (p.size || 0), 0);
+  const first = new Date(Math.min(...old.map(p => p.takenAt)));
+  alertSheet('Photos waiting for the PC', `${old.length} photo${old.length > 1 ? 's' : ''} (${mb(bytes)}), the oldest from ${first.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${old.length > 1 ? 'haven’t' : 'hasn’t'} been confirmed by a PC receipt yet, so ${old.length > 1 ? 'they’re' : 'it’s'} still taking space on this phone.\n\nExport them, get the ZIPs to whoever combines them, then load the latest receipt (Menu → Load PC receipt). Photos are only cleared after the PC confirms it has them.`);
+}
+loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); setTimeout(() => autoClean().then(() => unconfirmedReminder()).catch(() => {}), 1500); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
