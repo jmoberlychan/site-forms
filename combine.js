@@ -215,6 +215,49 @@ async function newestSheets(projDir, R) {
   return keep;
 }
 
+/* ---------------- step B2: one copy of each photo (1.9.2) ----------------
+   A photo's folder can change after it was exported: an unlinked photo is exported loose in the unit folder and
+   later linked to a condition (exported again into the component folder), linked to another component, or moved
+   to another unit. The newest record of where each photo belongs (each export ZIP's "Photo index" file, and each
+   inspector's newest spreadsheet) decides. Another copy is removed only when it has the same name and the same
+   size as the copy in the right place, so nothing that isn't an exact duplicate is ever deleted. */
+async function tidyPhotos(projDir, sheets, R) {
+  const latest = new Map();   // photo name -> { path, size, at }
+  const note = (name, path, size, at) => { if (!name || !/^Photos\//.test(path || '')) return; const o = latest.get(name); if (!o || at > o.at) latest.set(name, { path, size: +size || 0, at: +at || 0 }); };
+  for (const s of sheets) if (s.data) for (const ph of s.data.photos || []) note(ph.name, ph.path, ph.size, s.data.exportedAt);
+  let idxDir = null; try { idxDir = await projDir.getDirectoryHandle('Photo index'); } catch (_) {}
+  if (idxDir) for await (const [name, h] of idxDir.entries()) {
+    if (h.kind !== 'file' || !/\.json$/i.test(name)) continue;
+    try { const d = JSON.parse(await (await h.getFile()).text()); if (d && d.type === 'site-defects-photo-index') for (const ph of d.photos || []) note(ph.name, ph.path, ph.size, d.exportedAt); } catch (_) {}
+  }
+  if (!latest.size) return 0;
+  let photosDir = null; try { photosDir = await projDir.getDirectoryHandle('Photos'); } catch (_) { return 0; }
+  const copies = new Map();   // file name -> [{ dir, rel, size }]
+  async function walk(dir, rel) {
+    for await (const [name, h] of dir.entries()) {
+      if (h.kind === 'directory') { await walk(h, rel + '/' + name); continue; }
+      if (!latest.has(name)) continue;
+      const f = await h.getFile();
+      if (!copies.has(name)) copies.set(name, []);
+      copies.get(name).push({ dir, rel: rel + '/' + name, size: f.size });
+    }
+  }
+  await walk(photosDir, 'Photos');
+  let n = 0;
+  for (const [name, list] of copies) {
+    if (list.length < 2) continue;
+    const L = latest.get(name);
+    const keep = list.find(c => c.rel === L.path && c.size === L.size);
+    if (!keep) continue;                                            // the right copy isn't here yet: leave everything
+    for (const c of list) {
+      if (c === keep || c.size !== keep.size) continue;
+      try { await c.dir.removeEntry(name); n++; log(`  Tidied: ${c.rel} (now in ${L.path.replace(/\/[^/]+$/, '')})`); }
+      catch (e) { R.failed.push(`${c.rel} (old copy not removed: ${e.message})`); }
+    }
+  }
+  return n;
+}
+
 /* ---------------- step C: the combined spreadsheet ---------------- */
 async function previousResolutions(projDir, combinedName) {
   const map = new Map();
@@ -337,6 +380,8 @@ async function run() {
       status('Building ' + root);
       const projDir = await H.dest.getDirectoryHandle(root, { create: true });
       const sheets = await newestSheets(projDir, R);
+      const tidied = await tidyPhotos(projDir, sheets, R);
+      if (tidied) log(`  Removed ${tidied} old cop${tidied === 1 ? 'y' : 'ies'} of photos that changed folder, so each photo is in one folder.`);
       const usable = sheets.filter(s => s.data);
       for (const s of sheets.filter(s => !s.data)) log(`  ${s.name} was made before app version 1.8.0, so it can’t be combined. Export again from that inspector’s app (version 1.8.0 or later).`, 'warn');
       let summary = '';

@@ -328,7 +328,7 @@ function buildWorkbookFromModel(M) {
     ['Change Log', 'What changed between this inspector’s spreadsheet exports: results, notes and photo links added, changed or removed. Filter by Change to see only Changed / Removed.'],
     ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
     ['Combining', 'Use the Site Defects Combine page on the PC: it unpacks every export ZIP, from every inspector, into one folder per project, and builds the combined project spreadsheet.'],
-    ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component.'],
+    ['Photos folder', 'Renamed copies, sorted into Photos / Unit / Component. Photos not linked to any condition are loose in Photos / Unit.'],
     ['Unsorted folder', 'Every photo in one place, not sorted by unit: “Original names” has the photos under their original file names, “Renamed” has the same photos under their new names. The Photo Log matches each original to its renamed copy.'],
     ['Schedule', 'Units marked in the Schedule column of the Unit Matrix were on the visit schedule from the import file.'],
     ['Added on site', 'Units and conditions marked “added on site” were added in the app rather than coming from the import file.'],

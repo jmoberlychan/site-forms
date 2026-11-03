@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.9.2';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -78,6 +78,11 @@ async function activate(p) {
   for (const ph of S.photos) { // migrate v1.0 photos
     if (!ph.exp) ph.exp = { r: ph.exportedAt || null, o: null };
   }
+  // 1.9.2: remember where photos exported before 1.9.2 went (their component folder). Unlinked ones now belong loose in
+  // the unit folder, so their sorted copy is exported again there (the PC Combine page then removes the old copy).
+  for (const ph of S.photos) {
+    if (ph.exp.r && !ph.expPath) { ph.expPath = componentPath(ph, p); syncExport(ph); savePhotoMeta(ph); }
+  }
   p.state = p.state || {};
   p.addedComps = p.addedComps || [];
   if (!p.units.some(u => u.label === p.state.unit)) p.state.unit = null;
@@ -115,8 +120,16 @@ function folderName(s) {
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(n)) n = '_' + n;
   return n || 'Unnamed';
 }
-// Buildings' photos go in their own folder, Photos/Buildings/<building>/<component>/ (1.9.0)
-function photoPath(p, proj = S.project) { const e = proj && proj.units.find(u => u.label === p.unit); return 'Photos/' + (e && e.kind === 'building' ? BLDG_DIR + '/' : '') + folderName(p.unit) + '/' + folderName(p.component) + '/' + p.name; }
+// Where a photo's sorted copy goes:
+// - linked photos: Photos/<unit>/<component>/   (buildings: Photos/Buildings/<building>/<component>/, 1.9.0)
+// - unlinked photos: loose in Photos/<unit>/ (1.9.2), until they're linked
+// A photo already exported and removed from the phone stays where it was exported (its file can't be exported again).
+function unitDir(p, proj) { const e = proj && proj.units.find(u => u.label === p.unit); return 'Photos/' + (e && e.kind === 'building' ? BLDG_DIR + '/' : '') + folderName(p.unit) + '/'; }
+function componentPath(p, proj = S.project) { return unitDir(p, proj) + folderName(p.component) + '/' + p.name; }   // before 1.9.2, every photo went here
+function pathNow(p, proj = S.project) { return (p.defectIds && p.defectIds.length) ? componentPath(p, proj) : unitDir(p, proj) + p.name; }
+function photoPath(p, proj = S.project) { return p.removed ? (p.expPath || componentPath(p, proj)) : pathNow(p, proj); }
+// When a photo's folder changes (linked, unlinked, moved), its sorted copy has to be exported again.
+function syncExport(p) { if (!p.removed && p.exp && p.exp.r && p.expPath && p.expPath !== pathNow(p)) p.exp.r = null; }
 function genericOrigName(t, ext = 'jpg') { const d = new Date(t); return `${ext === 'jpg' ? 'IMG' : 'VID'}_${dateKey(t)}_${pad(d.getHours(), 2)}${pad(d.getMinutes(), 2)}${pad(d.getSeconds(), 2)}.${ext}`; }
 function origNameOf(p) { return p.origName || genericOrigName(p.takenAt, p.ext || 'jpg'); }
 const isVideo = p => p && p.kind === 'video';
@@ -647,12 +660,14 @@ async function linkPhoto(photo, defectId, setValue, skipPhotoSave) {
   o.updatedAt = Date.now(); o.inspector = S.settings.initials;
   await put('obs', o);
   if (!photo.defectIds.includes(defectId)) photo.defectIds.push(defectId);
+  syncExport(photo);
   await savePhotoMeta(photo);
 }
 async function unlinkPhoto(photo, defectId) {
   const o = getObs(photo.unit, defectId);
   if (o) { o.photoIds = o.photoIds.filter(x => x !== photo.id); o.updatedAt = Date.now(); await put('obs', o); }
   photo.defectIds = photo.defectIds.filter(x => x !== defectId);
+  syncExport(photo);
   await savePhotoMeta(photo);
 }
 async function deletePhoto(photo) {
@@ -2043,7 +2058,7 @@ async function autoClean(quiet) {
   const go = (await getAll('photos')).map(p => live.get(p.id) || p).filter(p => !p.removed && isConfirmed(p) && p.takenAt < cutoff);
   if (!go.length) return { n: 0, bytes: 0 };
   const d = await db(); const t = d.transaction(['photos', 'blobs'], 'readwrite'); const now = Date.now(); let bytes = 0;
-  for (const p of go) { p.removed = now; p.autoRemoved = true; t.objectStore('photos').put(p); t.objectStore('blobs').delete(p.id); bytes += p.size || 0; }
+  for (const p of go) { p.expPath = photoPath(p); p.removed = now; p.autoRemoved = true; t.objectStore('photos').put(p); t.objectStore('blobs').delete(p.id); bytes += p.size || 0; }
   await txDone(t);
   if (!quiet) { toast(`Cleared ${go.length} photo${go.length > 1 ? 's' : ''} the PC has confirmed (${mb(bytes)})`); render(); }
   refreshStorage();
@@ -2459,7 +2474,7 @@ async function openSettings() {
         busy('Freeing space…');
         const d = await db(); const t = d.transaction(['photos', 'blobs'], 'readwrite');
         const now = Date.now();
-        for (const ph of freeable) { ph.removed = now; t.objectStore('photos').put(ph); t.objectStore('blobs').delete(ph.id); }
+        for (const ph of freeable) { if (!ph.expPath) ph.expPath = photoPath(ph); ph.removed = now; t.objectStore('photos').put(ph); t.objectStore('blobs').delete(ph.id); }
         await txDone(t); busy(null); close(); render(); toast(`Removed ${freeable.length} photos · ${mb(freeMB)} freed`);
       };
       $('#s-max', el).value = String(S.settings.photoMax || 0);
@@ -2548,7 +2563,7 @@ function openExport() {
         <div class="section-h">Which photos</div>${seg('scope', [['new', 'Not yet exported'], ['all', 'All on phone']])}
       </div>
       <p class="note" id="x-sum" style="margin-top:12px"></p>
-      <p class="note"><b>Sorted:</b> renamed photos in <b>Photos / Unit / Component</b>. <b>Unsorted:</b> every photo in one <b>Unsorted</b> folder, with two sub-folders, <b>Original names</b> and <b>Renamed</b>. The spreadsheet sits beside them, so its photo links open directly.</p>`,
+      <p class="note"><b>Sorted:</b> renamed photos in <b>Photos / Unit / Component</b> (unlinked photos loose in <b>Photos / Unit</b>). <b>Unsorted:</b> every photo in one <b>Unsorted</b> folder, with two sub-folders, <b>Original names</b> and <b>Renamed</b>. The spreadsheet sits beside them, so its photo links open directly.</p>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="x-go">Export</button>`,
     mount(el, close) {
       const pick = () => opt.what === 'xls' ? [] : onPhone.filter(ph => opt.scope === 'all' || needsExport(ph, opt.copies));
@@ -2668,15 +2683,24 @@ async function exportRun({ photos, copies, withXls }) {
     if (xblob) entries.push({ path: root + '/' + xname, blob: xblob, crc: xcrc, date: now });
     for (let k = 0; k < j.photos.length; k++) {
       const ph = j.photos[k]; const b = await get('blobs', ph.id);
+      ph.zipPath = null;
       if (b) {
         if (ph.crc == null || ph.crcSize !== b.size) { ph.crc = await crcOfBlob(b); ph.crcSize = b.size; await savePhotoMeta(ph); }
-        if (copies !== 'o') entries.push({ path: root + '/' + photoPath(ph), blob: b, crc: ph.crc, date: ph.takenAt });
+        if (copies !== 'o') { ph.zipPath = photoPath(ph); entries.push({ path: root + '/' + ph.zipPath, blob: b, crc: ph.crc, date: ph.takenAt }); }
         if (copies !== 'r') {
           entries.push({ path: root + '/Unsorted/Original names/' + origNameOf(ph), blob: b, crc: ph.crc, date: ph.takenAt });
           entries.push({ path: root + '/Unsorted/Renamed/' + ph.name, blob: b, crc: ph.crc, date: ph.takenAt });
         }
       }
       if (k % 10 === 0) busy(`Preparing ${pre}${k + 1}/${j.photos.length} photos…`);
+    }
+    // 1.9.2: a small index of where this export put each photo, so the PC Combine page can tidy up an older copy
+    // left in another folder (for example a photo exported loose in the unit folder, then linked and exported again).
+    if (copies !== 'o') {
+      const idx = { type: 'site-defects-photo-index', v: 1, inspector: S.settings.initials || '', exportedAt: now,
+        photos: j.photos.filter(ph => ph.zipPath).map(ph => ({ name: ph.name, path: ph.zipPath, size: ph.size || 0 })) };
+      const ib = new Blob([JSON.stringify(idx)], { type: 'application/json' });
+      entries.push({ path: `${root}/Photo index/${safeName(S.settings.initials || 'XX')} ${stamp(now)}${j.total > 1 ? ' part ' + (j.idx + 1) : ''}.json`, blob: ib, crc: await crcOfBlob(ib), date: now });
     }
     const blob = zipBlob(entries);
     busy(null);
@@ -2750,7 +2774,11 @@ function shareStep(steps) {
         });
         if (yes) {
           const now = Date.now();
-          for (const ph of s.photos) { if (s.copies !== 'o') ph.exp.r = now; if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph); }
+          for (const ph of s.photos) {
+            if (s.copies !== 'o') { ph.exp.r = now; ph.expPath = ph.zipPath || photoPath(ph); syncExport(ph); }   // linked/unlinked since the ZIP was made: export again
+            delete ph.zipPath;
+            if (s.copies !== 'r') ph.exp.o = now; await savePhotoMeta(ph);
+          }
         } else toast('Not marked exported');
       } else if (how === 'dl') toast('Save it from the preview: share button → Save to Files');
       if (url) { const u = url; setTimeout(() => URL.revokeObjectURL(u), 10 * 60000); url = null; }
