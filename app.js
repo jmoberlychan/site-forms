@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -101,6 +101,12 @@ function fmtTime(t) { return new Date(t).toLocaleString([], { month: 'short', da
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function defectsFor(component) { return S.project.defects.filter(d => d.component === component); }
 function defectById(id) { return S.project.defects.find(d => d.id === id); }
+// A condition, or (1.9.1) a component's General notes & photos entry, which photos can be linked to
+// without proving any one defect. Its id is generalId(component).
+function condById(id) {
+  if (isGeneral(id)) { const component = String(id).split('::')[1] || ''; return { id, component, label: 'General photo · ' + component, code: '', general: true }; }
+  return defectById(id);
+}
 // Folder names in the sorted export. Names that are already fine on Windows come out unchanged.
 function folderName(s) {
   let n = safeName(s).replace(/[\u0000-\u001f\u007f]/g, '');
@@ -626,7 +632,7 @@ async function checkStorage(force) {
 async function savePhotoMeta(p) { await put('photos', p); }
 async function linkPhoto(photo, defectId, setValue, skipPhotoSave) {
   const unit = photo.unit;
-  const d = defectById(defectId);
+  const d = condById(defectId);
   // An unlinked photo linked to another component's condition moves into that component's folder —
   // unless its full-size file was already exported and removed (Free up space): then it stays where it was
   // exported, so the spreadsheet link keeps pointing at the real file.
@@ -661,7 +667,7 @@ async function ensureObs(unit, defectId) {
   const key = obsKey(unit, defectId);
   let o = S.obs.get(key);
   if (!o) {
-    const d = defectById(defectId);
+    const d = condById(defectId);
     o = { key, projectId: S.project.id, unit, defectId, component: d ? d.component : ctx().component, value: '', notes: '', photoIds: [], updatedAt: Date.now(), inspector: S.settings.initials };
     S.obs.set(key, o);
   }
@@ -738,13 +744,13 @@ function finishBatch() {
   if (b.defectId) {
     const nv = b.photos.filter(isVideo).length, np = b.photos.length - nv;
     const what = [np ? `${np} photo${np > 1 ? 's' : ''}` : '', nv ? `${nv} video${nv > 1 ? 's' : ''}` : ''].filter(Boolean).join(' + ');
-    toast(`${what} linked to ${defectById(b.defectId).label}`); return;
+    toast(`${what} linked to ${condById(b.defectId).label}`); renderList(); return;
   }
   linkSheet(b.photos, true);
 }
 function batchSheet() {
   const b = batch;
-  const d = b.defectId ? defectById(b.defectId) : null;
+  const d = b.defectId ? condById(b.defectId) : null;
   let draw = null, handled = false;
   openSheet({
     title: 'Photo saved', body: '', foot: ' ', modal: true,   // an outside tap can't drop the batch
@@ -1366,7 +1372,7 @@ function unlockFocus() {
 
 /* ---------- controls ---------- */
 function camCtxHTML() {
-  const { unit, component } = ctx(); const d = batch && batch.defectId ? defectById(batch.defectId) : null;
+  const { unit, component } = ctx(); const d = batch && batch.defectId ? condById(batch.defectId) : null;
   return `<b>${esc(unit)}</b> · ${esc(component)}${d ? `<br><span>${esc(d.label)}</span>` : ''}`;
 }
 function camUpdate() {
@@ -1816,11 +1822,13 @@ function linkSheet(photos, fresh) {
     title: fresh ? (n > 1 ? `${n} photos saved — link them?` : 'Photo saved — link it?') : `Link ${n} photo${n > 1 ? 's' : ''}`,
     body: `<div class="preview-strip">${photos.map(p => thumbHTML(p)).join('')}</div>
       <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this ${kindWord(unit).toLowerCase()}’s folder.</p>
-      <div>${ds.map(d => {
+      <div><div class="link-row general-row top"><span><b>General photo</b> · ${esc(component)}<span class="sub">For this ${kindWord(unit).toLowerCase()} and component, not one particular condition</span></span><span class="acts"><button class="mini" data-link="${generalId(component)}">Link</button></span></div>
+      ${ds.map(d => {
         const o = getObs(unit, d.id);
         return `<div class="link-row"><span>${d.code ? `<b>${esc(d.code)}</b> ` : ''}${esc(d.label)} ${o && o.value ? `<span class="vchip" data-v="${o.value}">${o.value}</span>` : ''}</span>
           <span class="acts"><button class="mini" data-link="${d.id}">Link</button><button class="mini red" data-link1="${d.id}">Link + 1</button></span></div>`;
-      }).join('')}</div>`,
+      }).join('')}
+</div>`,
     foot: fresh
       ? `<button class="btn ghost" data-close>Keep unlinked</button><button class="btn" id="again">Take another</button>`
       : `<button class="btn ghost" data-close>Cancel</button>`,
@@ -1830,7 +1838,7 @@ function linkSheet(photos, fresh) {
         const id = b.dataset.link || b.dataset.link1; const v = b.dataset.link1 ? '1' : null;
         for (const p of photos) await linkPhoto(p, id, v);
         S.selecting.clear(); close(); render();
-        toast(`Linked to ${defectById(id).label}${v ? ' · marked 1' : ''}`);
+        toast(`Linked to ${condById(id).label}${v ? ' · marked 1' : ''}`);
       });
       const again = $('#again', el); if (again) again.onclick = () => { close(); capture(null); };
     }
@@ -2106,9 +2114,10 @@ async function viewPhoto(id) {
       <div class="path">Original: ${esc(origNameOf(p))}</div>
       <div class="path">${esc(photoPath(p))} · ${fmtTime(p.takenAt)} · ${mb(p.size || 0)}</div>
       <div class="section-h">Proves</div>
-      ${p.defectIds.length ? p.defectIds.map(d => { const df = defectById(d); return `<div class="link-row"><span>${esc(df ? df.label : d)}</span><span class="acts"><button class="mini" data-unlink="${d}">Unlink</button></span></div>`; }).join('') : '<p class="note">Not linked to a condition yet.</p>'}
+      ${p.defectIds.length ? p.defectIds.map(d => { const df = condById(d); return `<div class="link-row"><span>${esc(df ? df.label : d)}</span><span class="acts"><button class="mini" data-unlink="${d}">Unlink</button></span></div>`; }).join('') : '<p class="note">Not linked to a condition yet.</p>'}
       <div class="section-h">Link to another condition</div>
-      ${ds.filter(d => !p.defectIds.includes(d.id)).map(d => `<div class="link-row"><span>${esc(d.label)}</span><span class="acts"><button class="mini" data-link="${d.id}">Link</button><button class="mini red" data-link1="${d.id}">Link + 1</button></span></div>`).join('')}`;
+      ${ds.filter(d => !p.defectIds.includes(d.id)).map(d => `<div class="link-row"><span>${esc(d.label)}</span><span class="acts"><button class="mini" data-link="${d.id}">Link</button><button class="mini red" data-link1="${d.id}">Link + 1</button></span></div>`).join('')}
+      ${comp && !p.defectIds.includes(generalId(comp)) ? `<div class="link-row general-row"><span><b>General photo</b> · ${esc(comp)}<span class="sub">Not one particular condition</span></span><span class="acts"><button class="mini" data-link="${generalId(comp)}">Link</button></span></div>` : ''}`;
   };
   openSheet({
     title: 'Photo', body: '', foot: `<button class="btn danger" id="v-del">Delete photo</button>`,
@@ -2120,7 +2129,7 @@ async function viewPhoto(id) {
           if (b.dataset.unlink) {
             // a removed photo is only a thumbnail here: make unlinking it a deliberate, second step
             if (p.removed) {
-              const df = defectById(b.dataset.unlink);
+              const df = condById(b.dataset.unlink);
               if (!await confirmSheet('Unlink a removed photo?', `${p.name} was exported and removed from this phone, so only its thumbnail is left.\n\nIf you unlink it, it no longer proves “${df ? df.label : b.dataset.unlink}”, and the next spreadsheet export won’t link to it. The exported file on the PC isn’t affected, and you can link it again from this photo.\n\nCheck that this is the right photo.`, 'Unlink', true)) return;
             }
             await unlinkPhoto(p, b.dataset.unlink);
@@ -2264,13 +2273,29 @@ function renderList() {
   list.innerHTML = (ds.length ? '' : `<div class="empty"><h2>No conditions yet</h2>${esc(st.component)} has no defect conditions. Add the first one below.</div>`)
     + ds.map(defectHTML).join('') + `
     <button class="add-row" id="add-defect">+ Add defect condition to ${esc(st.component)}</button>
-    <section class="defect general"><h3 class="d-title">General notes — ${esc(st.unit)} · ${esc(st.component)}</h3>
-      <textarea class="notes" data-note="${gid}" placeholder="Anything else at this ${kindWord(st.unit).toLowerCase()} for this component">${esc(g ? g.notes : '')}</textarea></section>`;
+    ${generalHTML()}`;
   $('#add-defect').onclick = addDefectSheet;
   hydrateThumbs(list);
 }
+// The component's General notes & photos box (photos here belong to the unit and component, not one defect).
+function generalHTML() {
+  const st = S.project.state, gid = generalId(st.component), g = getObs(st.unit, gid);
+  const photos = g ? (g.photoIds || []).map(photoById).filter(Boolean) : [];
+  return `<section class="defect general" data-d="${esc(gid)}"><h3 class="d-title">General notes &amp; photos — ${esc(st.unit)} · ${esc(st.component)}</h3>
+      <div class="d-actions">
+        <button class="chip${photos.length ? ' has' : ''}" data-act="photo">📷 Photo${photos.length ? ' · ' + photos.length : ''}</button>
+        <button class="chip" data-act="attach">Link unlinked</button>
+      </div>
+      ${photos.length ? `<div class="thumbs">${photos.map(p => thumbHTML(p, { badge: '#' + p.seq })).join('')}</div>` : ''}
+      <textarea class="notes" data-note="${esc(gid)}" placeholder="Anything else at this ${kindWord(st.unit).toLowerCase()} for this component">${esc(g ? g.notes : '')}</textarea></section>`;
+}
 function renderDefect(id) {
-  const el = document.querySelector(`.defect[data-d="${id}"]`); if (!el) return;
+  const el = document.querySelector(`.defect[data-d="${CSS.escape(id)}"]`); if (!el) return;
+  if (isGeneral(id)) {
+    if (id !== generalId(S.project.state.component)) return;
+    const tmp = document.createElement('div'); tmp.innerHTML = generalHTML();
+    el.replaceWith(tmp.firstElementChild); hydrateThumbs(document.querySelector(`.defect[data-d="${CSS.escape(id)}"]`)); return;
+  }
   const d = defectById(id); const tmp = document.createElement('div'); tmp.innerHTML = defectHTML(d);
   el.replaceWith(tmp.firstElementChild); hydrateThumbs(document.querySelector(`.defect[data-d="${id}"]`));
 }
@@ -2288,7 +2313,7 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => { const t = e.target.closest('[data-note]'); if (t) saveNote(t.dataset.note, t.value); });
 
 function attachToDefect(defectId) {
-  const ps = trayPhotos(); const d = defectById(defectId);
+  const ps = trayPhotos(); const d = condById(defectId);
   if (!ps.length) { toast(`No unlinked photos at this ${kindWord(ctx().unit).toLowerCase()} — use the big camera button first`); return; }
   const chosen = new Set();
   openSheet({
@@ -2479,7 +2504,7 @@ function snapshotOf(obs) {
   return snap;
 }
 function describeCondition(defectId, comp) {
-  if (isGeneral(defectId)) return { component: comp || String(defectId).split('::')[1] || '', code: '', label: 'General notes' };
+  if (isGeneral(defectId)) return { component: comp || String(defectId).split('::')[1] || '', code: '', label: 'General notes & photos' };
   const d = defectById(defectId);
   return d ? { component: d.component, code: d.code || '', label: d.label } : { component: comp || '', code: '', label: defectId };
 }

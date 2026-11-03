@@ -121,7 +121,7 @@ function buildWorkbookFromModel(M) {
   const rows = [head];
   const obsRowOf = new Map();
   for (const o of allObs) {
-    const d = o.general ? { label: 'General notes', code: '' } : (defById.get(o.defectId) || { label: o.defectId + ' (removed from list)', code: '' });
+    const d = o.general ? { label: 'General notes & photos', code: '' } : (defById.get(o.defectId) || { label: o.defectId + ' (removed from list)', code: '' });
     const r = [o.unit, o.component, d.code || '', d.label, cellVal(o.value || '')];
     if (combined) r.push(o.conflict || '', o.recordedBy || '');
     r.push(o.notes || '', o.photos.length);
@@ -278,9 +278,11 @@ function buildWorkbookFromModel(M) {
   const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during', 'Moved from unit']];
   const sortedPh = [...M.photos].sort((a, b) => a.takenAt - b.takenAt);
   for (const ph of sortedPh) {
-    const ds = (ph.defectIds || []).map(id => defById.get(id)).filter(Boolean);
+    // 1.9.1: a photo linked to a component's General notes & photos (not one particular defect)
+    const gen = (ph.defectIds || []).filter(id => String(id).startsWith('_general::')).map(id => ({ id, label: 'General photo (' + String(id).split('::')[1] + ')', general: true }));
+    const ds = [...(ph.defectIds || []).map(id => defById.get(id)).filter(Boolean), ...gen];
     pRows.push([hyperlink(ph.name, ph.path), ph.kind === 'video' ? 'Video' : 'Photo', ph.origName || '', ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
-      ds.map(d => { const o = getO(ph.unit, d.id); return o ? (o.conflict === 'Unresolved' ? 'conflict' : (o.value || '–')) : '–'; }).join('; '), new Date(ph.takenAt), ph.initials || '', ph.path.replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '']);
+      ds.map(d => { if (d.general) return '–'; const o = getO(ph.unit, d.id); return o ? (o.conflict === 'Unresolved' ? 'conflict' : (o.value || '–')) : '–'; }).join('; '), new Date(ph.takenAt), ph.initials || '', ph.path.replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '']);
   }
   const wsP = XLSX.utils.aoa_to_sheet(capCells(pRows), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
   wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }, { wch: 14 }];
@@ -322,6 +324,7 @@ function buildWorkbookFromModel(M) {
     ['Summary', 'Per condition: defective count (1), observed count (1 + 0), % defective, NA and NR. Formulas update if you edit Observations.'],
     ['Observations', 'One row per unit and condition with notes and links to every proof photo. Filter by unit, component or result.'],
     ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
+    ['General photos', 'Photos linked to a component’s General notes & photos belong to that unit and component but not to one particular condition. They are on the “General notes & photos” row in Observations and are marked “General photo” in the Photo Log.'],
     ['Change Log', 'What changed between this inspector’s spreadsheet exports: results, notes and photo links added, changed or removed. Filter by Change to see only Changed / Removed.'],
     ['Photo links', 'Links are relative. Keep this file next to the Photos folder (as exported) and they open in Excel.'],
     ['Combining', 'Use the Site Defects Combine page on the PC: it unpacks every export ZIP, from every inspector, into one folder per project, and builds the combined project spreadsheet.'],
