@@ -87,6 +87,14 @@ function diffSnapshots(prev, cur, ctx) {
 function buildWorkbookFromModel(M) {
   const p = M.project, combined = !!(M.meta && M.meta.combined);
   const wb = XLSX.utils.book_new();
+  // Buildings (1.9.0): when roofs are recorded by building, buildings get their own matrix and only the
+  // building components (the roof); units get every other component.
+  const isB = u => u && u.kind === 'building';
+  const unitsU = p.units.filter(u => !isB(u)), unitsB = p.units.filter(isB);
+  const bSet = new Set(p.bldgComps || []), byB = p.roofBy === 'building';
+  const unitComps = byB ? p.components.filter(c => !bSet.has(c)) : p.components;
+  const bldgCompList = bSet.size ? p.components.filter(c => bSet.has(c)) : p.components;
+  const popOf = d => byB && bSet.has(d.component) ? unitsB.length : unitsU.length;   // how many could be recorded
   const defById = new Map(p.defects.map(d => [d.id, d]));
   const obsMap = new Map(M.obs.map(o => [o.unit + '|' + o.defectId, o]));
   const getO = (u, d) => obsMap.get(u + '|' + d);
@@ -152,7 +160,7 @@ function buildWorkbookFromModel(M) {
       { t: 'n', v: c1 + c0 ? c1 / (c1 + c0) : 0, f: `IF(E${r}=0,0,D${r}/E${r})`, z: '0%' },
       { t: 'n', v: na, f: `COUNTIFS(${base},${range(resCol)},"NA")` },
       { t: 'n', v: nr, f: `COUNTIFS(${base},${range(resCol)},"NR")` },
-      { t: 'n', v: p.units.length - (c1 + c0 + na + nr + nc), f: combined ? `${p.units.length}-E${r}-G${r}-H${r}-J${r}` : `${p.units.length}-E${r}-G${r}-H${r}` }];
+      { t: 'n', v: popOf(d) - (c1 + c0 + na + nr + nc), f: combined ? `${popOf(d)}-E${r}-G${r}-H${r}-J${r}` : `${popOf(d)}-E${r}-G${r}-H${r}` }];
     if (combined) row.push({ t: 'n', v: nc, f: `COUNTIFS(${base},${range(conflictCol)},"Unresolved")` });
     row.push(d.added ? 'Added on site' : (d.orphan ? 'No longer in the import file' : 'Import file'), d.id);
     sRows.push(row);
@@ -173,74 +181,81 @@ function buildWorkbookFromModel(M) {
   wsS['!autofilter'] = { ref: `A1:${colName(sHead.length - 2)}${sRows.length - 1}` };
   if (combined) sRows.forEach((r, i) => { if (i && i < sRows.length - 1 && r[9].v > 0) { const a = 'J' + (i + 1); wsS[a].s = ST.conflict; } });
 
-  /* --- Unit matrix (like the paper form) --- */
-  const defs = p.defects;
-  const r1 = ['Unit', 'Address / description', 'Schedule'], r2 = ['', '', ''];
-  const merges = [];
-  let col = 3;
-  for (const c of p.components) {
-    const ds = defs.filter(d => d.component === c); if (!ds.length) continue;
-    r1.push(c, ...Array(ds.length - 1).fill(''));
-    if (ds.length > 1) merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + ds.length - 1 } });
-    ds.forEach(d => r2.push((d.code ? d.code + ' ' + d.label : d.label) + (d.added ? ' (added on site)' : '')));
-    col += ds.length;
-  }
-  const orderedDefs = p.components.flatMap(c => defs.filter(d => d.component === c));
-  const firstC = 3, lastC = 3 + orderedDefs.length - 1;
-  r1.push('Defective (1)', 'Observed (1 + 0)', 'Photos'); r2.push('', '', '');
-  const mRows = [r1, r2];
-  const matrixCell = new Map();   // "unit|defectId" -> "D12" (for the Conflicts sheet's links)
+  /* --- Unit matrix (like the paper form), and the Building Matrix when roofs are recorded by building --- */
+  const matrixCell = new Map();   // "unit|defectId" -> "'Unit Matrix'!D12" (for the Conflicts sheet's links)
   const conflictCells = [], resolvedCells = [];
-  p.units.forEach((u, ui) => {
-    const rr = ui + 3;
-    const row = [u.label, [u.desc, u.added ? '(added on site)' : ''].filter(Boolean).join(' '), u.sched != null ? (u.schedLabel && u.schedLabel !== 'added' ? u.schedLabel : 'Yes') : ''];
-    let c1 = 0, c10 = 0, nph = 0;
-    orderedDefs.forEach((d, di) => {
-      const o = getO(u.label, d.id);
-      const v = o ? o.value : '';
-      const ph = o ? o.photos : [];
-      nph += ph.length;
-      if (v === '1') c1++; if (v === '1' || v === '0') c10++;
-      const addr = colName(firstC + di) + rr;
-      matrixCell.set(u.label + '|' + d.id, addr);
-      if (o && o.conflict === 'Unresolved') conflictCells.push(addr); else if (o && o.conflict === 'Resolved') resolvedCells.push(addr);
-      if (v && ph.length) row.push({ ...(v === '1' || v === '0' ? { t: 'n', v: +v } : { t: 's', v }), l: { Target: linkTarget(ph[0].path), Tooltip: tipList(ph.map(x => x.name)) } });
-      else row.push(cellVal(v));
+  function buildMatrix(sheetName, entries, comps, word) {
+    const defs = p.defects;
+    const r1 = [word, 'Address / description', 'Schedule'], r2 = ['', '', ''];
+    const merges = [];
+    let col = 3;
+    for (const c of comps) {
+      const ds = defs.filter(d => d.component === c); if (!ds.length) continue;
+      r1.push(c, ...Array(ds.length - 1).fill(''));
+      if (ds.length > 1) merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + ds.length - 1 } });
+      ds.forEach(d => r2.push((d.code ? d.code + ' ' + d.label : d.label) + (d.added ? ' (added on site)' : '')));
+      col += ds.length;
+    }
+    const orderedDefs = comps.flatMap(c => defs.filter(d => d.component === c));
+    const firstC = 3, lastC = 3 + orderedDefs.length - 1;
+    r1.push('Defective (1)', 'Observed (1 + 0)', 'Photos'); r2.push('', '', '');
+    const mRows = [r1, r2];
+    const conf = [], reso = [];
+    entries.forEach((u, ui) => {
+      const rr = ui + 3;
+      const row = [u.label, [u.desc, u.added ? '(added on site)' : ''].filter(Boolean).join(' '), u.sched != null ? (u.schedLabel && u.schedLabel !== 'added' ? u.schedLabel : 'Yes') : ''];
+      let c1 = 0, c10 = 0, nph = 0;
+      orderedDefs.forEach((d, di) => {
+        const o = getO(u.label, d.id);
+        const v = o ? o.value : '';
+        const ph = o ? o.photos : [];
+        nph += ph.length;
+        if (v === '1') c1++; if (v === '1' || v === '0') c10++;
+        const addr = colName(firstC + di) + rr;
+        matrixCell.set(u.label + '|' + d.id, { sheet: sheetName, addr });
+        if (o && o.conflict === 'Unresolved') conf.push(addr); else if (o && o.conflict === 'Resolved') reso.push(addr);
+        if (v && ph.length) row.push({ ...(v === '1' || v === '0' ? { t: 'n', v: +v } : { t: 's', v }), l: { Target: linkTarget(ph[0].path), Tooltip: tipList(ph.map(x => x.name)) } });
+        else row.push(cellVal(v));
+      });
+      const rg = `${colName(firstC)}${rr}:${colName(lastC)}${rr}`;
+      row.push({ t: 'n', v: c1, f: `COUNTIF(${rg},1)` }, { t: 'n', v: c10, f: `COUNTIF(${rg},1)+COUNTIF(${rg},0)` }, nph);
+      mRows.push(row);
     });
-    const rg = `${colName(firstC)}${rr}:${colName(lastC)}${rr}`;
-    row.push({ t: 'n', v: c1, f: `COUNTIF(${rg},1)` }, { t: 'n', v: c10, f: `COUNTIF(${rg},1)+COUNTIF(${rg},0)` }, nph);
-    mRows.push(row);
-  });
-  const endU = p.units.length + 2;
-  const totD = ['Defective (1)', '', ''], totO = ['Observed (1 + 0)', '', ''], totP = ['% defective', '', ''];
-  orderedDefs.forEach((d, i) => {
-    const cl = colName(firstC + i); const rg = `${cl}3:${cl}${endU}`;
-    const vals = p.units.map(u => (getO(u.label, d.id) || {}).value);
-    const a = vals.filter(v => v === '1').length, b = a + vals.filter(v => v === '0').length;
-    totD.push({ t: 'n', v: a, f: `COUNTIF(${rg},1)` });
-    totO.push({ t: 'n', v: b, f: `COUNTIF(${rg},1)+COUNTIF(${rg},0)` });
-    totP.push({ t: 'n', v: b ? a / b : 0, f: `IF(${cl}${endU + 2}=0,0,${cl}${endU + 1}/${cl}${endU + 2})`, z: '0%' });
-  });
-  mRows.push(totD, totO, totP);
-  const wsM = XLSX.utils.aoa_to_sheet(capCells(mRows));
-  wsM['!merges'] = merges;
-  wsM['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 10 }, ...orderedDefs.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 14 }, { wch: 8 }];
-  orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (wsM[a]) wsM[a].z = '0%'; });
-  for (const a of conflictCells) { wsM[a] = { t: 's', v: '', s: ST.conflict }; }
-  for (const a of resolvedCells) { if (wsM[a]) wsM[a].s = ST.resolved; }
+    const endU = entries.length + 2;
+    const totD = ['Defective (1)', '', ''], totO = ['Observed (1 + 0)', '', ''], totP = ['% defective', '', ''];
+    orderedDefs.forEach((d, i) => {
+      const cl = colName(firstC + i); const rg = `${cl}3:${cl}${endU}`;
+      const vals = entries.map(u => (getO(u.label, d.id) || {}).value);
+      const a = vals.filter(v => v === '1').length, b = a + vals.filter(v => v === '0').length;
+      totD.push({ t: 'n', v: a, f: `COUNTIF(${rg},1)` });
+      totO.push({ t: 'n', v: b, f: `COUNTIF(${rg},1)+COUNTIF(${rg},0)` });
+      totP.push({ t: 'n', v: b ? a / b : 0, f: `IF(${cl}${endU + 2}=0,0,${cl}${endU + 1}/${cl}${endU + 2})`, z: '0%' });
+    });
+    mRows.push(totD, totO, totP);
+    const ws = XLSX.utils.aoa_to_sheet(capCells(mRows));
+    ws['!merges'] = merges;
+    ws['!cols'] = [{ wch: word === 'Building' ? 24 : 12 }, { wch: 22 }, { wch: 10 }, ...orderedDefs.map(() => ({ wch: 14 })), { wch: 12 }, { wch: 14 }, { wch: 8 }];
+    orderedDefs.forEach((_, i) => { const a = colName(firstC + i) + (endU + 3); if (ws[a]) ws[a].z = '0%'; });
+    for (const a of conf) { ws[a] = { t: 's', v: '', s: ST.conflict }; }
+    for (const a of reso) { if (ws[a]) ws[a].s = ST.resolved; }
+    conflictCells.push(...conf); resolvedCells.push(...reso);
+    return ws;
+  }
+  const wsM = buildMatrix('Unit Matrix', unitsU, unitComps, 'Unit');
+  const wsB = unitsB.length ? buildMatrix('Building Matrix', unitsB, bldgCompList, 'Building') : null;
 
   /* --- Conflicts (combined spreadsheet only) --- */
   let wsC = null;
   if (combined) {
     const insp = M.meta.inspectors || [];
-    const cHead = ['Status', 'Unit', 'Component', 'Code', 'Defect condition', ...insp.map(x => x + ' result'), 'Go to cell', 'Resolved result', 'Why / notes', 'Photos (all inspectors)', 'Key', 'Signature'];
+    const cHead = ['Status', unitsB.length ? 'Unit / building' : 'Unit', 'Component', 'Code', 'Defect condition', ...insp.map(x => x + ' result'), 'Go to cell', 'Resolved result', 'Why / notes', 'Photos (all inspectors)', 'Key', 'Signature'];
     const cRows = [cHead];
     for (const c of M.conflicts || []) {
       const by = new Map(c.entries.map(e => [e.by, e]));
-      const addr = matrixCell.get(c.unit + '|' + c.defectId);
+      const mc = matrixCell.get(c.unit + '|' + c.defectId);
       cRows.push([c.status, c.unit, c.component, c.code || '', c.label,
         ...insp.map(x => { const e = by.get(x); return e ? `${RESULT_TEXT(e.v) || '(blank)'}  ·  ${e.at ? new Date(e.at).toISOString().slice(0, 16).replace('T', ' ') : ''}` : ''; }),
-        addr ? { t: 's', v: 'Unit Matrix ' + addr, l: { Target: `#'Unit Matrix'!${addr}`, Tooltip: 'Go to this cell' } } : '',
+        mc ? { t: 's', v: mc.sheet + ' ' + mc.addr, l: { Target: `#'${mc.sheet}'!${mc.addr}`, Tooltip: 'Go to this cell' } } : '',
         c.resolved || '', c.note || '', c.photoNames || '', c.key, c.sig]);
     }
     capCells(cRows);
@@ -285,12 +300,13 @@ function buildWorkbookFromModel(M) {
   /* --- About --- */
   const info = combined ? [
     ['Project number', p.number], ['Project name', p.name || ''], ['Combined', new Date(M.meta.exportedAt)], ['Inspectors', (M.meta.inspectors || []).join(', ')],
-    ['Units', p.units.length], ['Defect conditions', p.defects.length], ['Photos', M.photos.length], ['Unresolved conflicts', (M.conflicts || []).filter(c => c.status === 'Unresolved').length], [],
+    ['Units', unitsU.length], ...(unitsB.length ? [['Buildings', unitsB.length]] : []), ['Roofs recorded', byB ? 'By building' : 'By unit'], ['Defect conditions', p.defects.length], ['Photos', M.photos.length], ['Unresolved conflicts', (M.conflicts || []).filter(c => c.status === 'Unresolved').length], [],
     ['Built from'], ...(M.meta.sources || []).map(s => [s.by, `${s.file} (exported ${new Date(s.at).toISOString().slice(0, 16).replace('T', ' ')})`]), [],
     ['How to read this workbook'],
     ['Combined', 'Built by the Site Defects Combine page from each inspector’s newest spreadsheet. It is rebuilt from scratch on every run, so don’t edit results here: edit them in the app, or resolve conflicts on the Conflicts sheet.'],
     ['Conflicts', 'Where inspectors recorded different results for the same unit and condition, the result is left BLANK and the cell is highlighted. On the Conflicts sheet, type 1, 0, NA or NR in “Resolved result” and save; the next Combine run puts it in the Unit Matrix (green). If an inspector later changes one of the disputed results, the conflict is raised again.'],
     ['Unit Matrix', 'Same layout as the paper form: units down the side, conditions across the top. Click a 1 or 0 to open its first proof photo.'],
+    ...(unitsB.length ? [['Building Matrix', 'The same for buildings: one row per building, with the building components (the roof). Building photos are in Photos / Buildings / Building / Component.']] : []),
     ['Summary', 'Per condition: defective (1), observed (1 + 0), % defective, NA, NR, not yet recorded and unresolved conflicts. Formulas update if you edit Observations.'],
     ['Observations', 'One row per unit and condition: final result, who recorded what, everyone’s notes, and links to every proof photo.'],
     ['Photo Log', 'Every photo from every inspector, where it was taken and which conditions it proves.'],
@@ -299,9 +315,10 @@ function buildWorkbookFromModel(M) {
     ['Results', '1 = defective, 0 = not defective, NA = condition doesn’t exist at the unit, NR = not able to be recorded.'],
   ] : [
     ['Project number', p.number], ['Project name', p.name || ''], ['Exported', new Date(M.meta.exportedAt)], ['Exported by', M.meta.exportedBy || ''],
-    ['Units', p.units.length], ['Defect conditions', p.defects.length], ['Photos', M.photos.length], [],
+    ['Units', unitsU.length], ...(unitsB.length ? [['Buildings', unitsB.length]] : []), ['Roofs recorded', byB ? 'By building' : 'By unit'], ['Defect conditions', p.defects.length], ['Photos', M.photos.length], [],
     ['How to read this workbook'],
     ['Unit Matrix', 'Same layout as the paper form: units down the side, conditions across the top. Click a 1 or 0 to open its first proof photo.'],
+    ...(unitsB.length ? [['Building Matrix', 'The same for buildings: one row per building, with the building components (the roof). Building photos are in Photos / Buildings / Building / Component.']] : []),
     ['Summary', 'Per condition: defective count (1), observed count (1 + 0), % defective, NA and NR. Formulas update if you edit Observations.'],
     ['Observations', 'One row per unit and condition with notes and links to every proof photo. Filter by unit, component or result.'],
     ['Photo Log', 'Every photo, where it was taken and which conditions it proves.'],
@@ -317,6 +334,7 @@ function buildWorkbookFromModel(M) {
   const wsI = XLSX.utils.aoa_to_sheet(capCells(info), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' }); wsI['!cols'] = [{ wch: 20 }, { wch: 100 }];
 
   XLSX.utils.book_append_sheet(wb, wsM, 'Unit Matrix');
+  if (wsB) XLSX.utils.book_append_sheet(wb, wsB, 'Building Matrix');
   if (wsC) XLSX.utils.book_append_sheet(wb, wsC, 'Conflicts');
   XLSX.utils.book_append_sheet(wb, wsS, 'Summary');
   XLSX.utils.book_append_sheet(wb, wsO, 'Observations');

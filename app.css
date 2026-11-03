@@ -68,7 +68,13 @@ button { cursor: pointer; }
 }
 .unit-btn .lbl { display: block; font-size: 12px; color: var(--tag-sub); }
 .unit-btn .val { display: block; font-size: 34px; font-weight: 800; letter-spacing: -.5px; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.unit-btn .val.long { font-size: 26px; line-height: 1.25; }
 .unit-btn .sub { display: block; font-size: 13px; color: var(--tag-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Units | Buildings switch (1.9.0) */
+.view-seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 6px 0 4px; padding: 3px; border-radius: 9px; background: rgba(255,255,255,.1); }
+.view-seg button { border: 0; background: transparent; color: var(--tag-sub); border-radius: 7px; min-height: 36px; font-size: 15px; font-weight: 700; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.view-seg button[aria-selected="true"] { background: var(--tag-ink); color: #15201C; }
+.unit-btn.bldg .lbl { color: var(--tag-ink); font-weight: 700; letter-spacing: .3px; text-transform: uppercase; }
 .comp-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
 .comp-btn {
   flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: 8px;

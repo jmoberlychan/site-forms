@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -82,6 +82,8 @@ async function activate(p) {
   p.addedComps = p.addedComps || [];
   if (!p.units.some(u => u.label === p.state.unit)) p.state.unit = null;
   if (!p.components.includes(p.state.component)) p.state.component = null;
+  if (p.state.unit && p.state.component && !compsFor(p.state.unit).includes(p.state.component)) p.state.component = null;
+  if (!hasBldgs()) p.state.view = 'unit';
 }
 
 /* ================= Helpers ================= */
@@ -107,7 +109,8 @@ function folderName(s) {
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(n)) n = '_' + n;
   return n || 'Unnamed';
 }
-function photoPath(p) { return 'Photos/' + folderName(p.unit) + '/' + folderName(p.component) + '/' + p.name; }
+// Buildings' photos go in their own folder, Photos/Buildings/<building>/<component>/ (1.9.0)
+function photoPath(p, proj = S.project) { const e = proj && proj.units.find(u => u.label === p.unit); return 'Photos/' + (e && e.kind === 'building' ? BLDG_DIR + '/' : '') + folderName(p.unit) + '/' + folderName(p.component) + '/' + p.name; }
 function genericOrigName(t, ext = 'jpg') { const d = new Date(t); return `${ext === 'jpg' ? 'IMG' : 'VID'}_${dateKey(t)}_${pad(d.getHours(), 2)}${pad(d.getMinutes(), 2)}${pad(d.getSeconds(), 2)}.${ext}`; }
 function origNameOf(p) { return p.origName || genericOrigName(p.takenAt, p.ext || 'jpg'); }
 const isVideo = p => p && p.kind === 'video';
@@ -145,9 +148,58 @@ function videoThumb(f) {
   });
 }
 function hasBlob(p) { return !p.removed; }
+/* ---------- Buildings (1.9.0) ----------
+   When the setup file says roofs are recorded by building, buildings are kept in the same list as units
+   (results and photos are keyed by name either way) but marked kind: 'building'. They are shown, stepped
+   through and exported separately, and only the building components (the roof) are offered at a building;
+   those components are not offered at units. */
+const BLDG_DIR = 'Buildings';                                    // photos: Photos/Buildings/<building>/<component>/
+const isBldg = u => !!u && u.kind === 'building';
+const entryOf = label => S.project && S.project.units.find(u => u.label === label);
+const isBldgLabel = label => isBldg(entryOf(label));
+const kindOf = label => isBldgLabel(label) ? 'building' : 'unit';
+const hasBldgs = () => !!S.project && S.project.units.some(isBldg);
+const isBldgComp = c => !!S.project && (S.project.bldgComps || []).includes(c);
+const bldgMode = () => !!S.project && S.project.roofBy === 'building';
+// The components offered at a unit or building.
+function compsOfKind(kind) {
+  const p = S.project; if (!p) return [];
+  if (kind === 'building') return p.components.filter(isBldgComp);
+  return bldgMode() ? p.components.filter(c => !isBldgComp(c)) : p.components;
+}
+const compsFor = label => compsOfKind(label ? kindOf(label) : 'unit');
+const KIND_WORD = { unit: 'Unit', building: 'Building' };
+const kindWord = label => KIND_WORD[kindOf(label)];
+// Which list is showing: the current entry's kind, or the list last switched to.
+function curView() { const p = S.project; if (!p) return 'unit'; if (p.state.unit) return kindOf(p.state.unit); return hasBldgs() && p.state.view === 'building' ? 'building' : 'unit'; }
+// Go to a unit or building. The component carries over if it's offered there; otherwise the last one used
+// for that kind (or the only one, e.g. Roof at buildings) is picked.
+function setEntry(label) {
+  const p = S.project, st = p.state;
+  if (st.unit && st.component) { st.lastComp = st.lastComp || {}; st.lastComp[kindOf(st.unit)] = st.component; }
+  st.unit = label; const kind = kindOf(label); st.view = kind;
+  st.last = st.last || {}; st.last[kind] = label;
+  const cs = compsFor(label);
+  if (!cs.includes(st.component)) {
+    const lc = st.lastComp && st.lastComp[kind];
+    st.component = cs.includes(lc) ? lc : cs.length === 1 ? cs[0] : null;
+  }
+}
+// The Units | Buildings switch in the header.
+async function switchView(kind) {
+  const p = S.project, st = p.state;
+  if (curView() === kind) return;
+  if (st.unit && st.component) { st.lastComp = st.lastComp || {}; st.lastComp[kindOf(st.unit)] = st.component; }
+  const back = st.last && st.last[kind];
+  if (back && entryOf(back) && kindOf(back) === kind) setEntry(back);
+  else { st.unit = null; st.view = kind; const cs = compsOfKind(kind); st.component = cs.includes(st.lastComp && st.lastComp[kind]) ? st.lastComp[kind] : cs.length === 1 ? cs[0] : null; }
+  await saveProject(); render(); window.scrollTo(0, 0);
+  if (!st.unit) pickUnit(kind);
+}
 // Units in working order: scheduled units first (by schedule), then everything else in list order.
-function unitsInOrder() {
-  const us = S.project.units.map((u, i) => ({ u, i }));
+// kind: 'unit' or 'building' (default: units).
+function unitsInOrder(kind = 'unit') {
+  const us = S.project.units.filter(u => (kind === 'building') === isBldg(u)).map((u, i) => ({ u, i }));
   const sch = us.filter(x => x.u.sched != null).sort((a, b) => a.u.sched - b.u.sched || a.i - b.i);
   const rest = us.filter(x => x.u.sched == null);
   return [...sch, ...rest].map(x => x.u);
@@ -189,17 +241,22 @@ const PROJ_RE = /^\d{6}\.\d{2}(-[A-Za-z0-9]{4})?$/;
 function fixProjNum(t) { return /^\d{6}(\.\d{1,2})?$/.test(t) ? Number(t).toFixed(2) : t; }
 function parseWorkbook(wb, fileName) {
   const sheets = wb.SheetNames.map(n => ({ name: n, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '', raw: false, blankrows: false }) }));
-  let number = '', name = '';
+  let number = '', name = '', roofSetting = '';
   for (const s of sheets) for (const r of s.rows) {
     const k = norm(r[0]);
     if (/^(project|job) ?(number|no\.?|#|num)$/.test(k) && String(r[1]).trim()) number = fixProjNum(String(r[1]).trim());
     if (/^(project|job) ?name$/.test(k) && String(r[1]).trim()) name = String(r[1]).trim();
+    // "Roofs: By unit" or "Roofs: By building" (1.9.0)
+    // first one found wins, and only a short value counts, so an instructions sheet that mentions roofs can't override it
+    if (!roofSetting && /^roof(s|ing)?( (are )?(recorded|inspected|observed))?( (by|at|per))?:?$/.test(k) && /^(by |at |per )?(unit|units|building|buildings|bldg|bldgs)$/.test(norm(r[1]).replace(/\.$/, ''))) roofSetting = norm(r[1]);
   }
+  const isBldgSheet = s => /building|bldg/i.test(s.name);
   // Defects: long format (Component | Defect [| Code])
   let defects = [];
   const order = s => /defect|condition/i.test(s.name) ? 0 : 1;
   for (const s of [...sheets].sort((a, b) => order(a) - order(b))) {
-    const h = findHeader(s.rows, { comp: /^(component|category|system|area)s?$/, def: /^(defect|defects|condition|conditions|defect description|description|item)$/, optCode: /^(code|id|ref|no\.?|#|defect code|defect no\.?)$/ });
+    if (isBldgSheet(s)) continue;
+    const h = findHeader(s.rows, { comp: /^(component|category|system|area)s?$/, def: /^(defect|defects|condition|conditions|defect description|description|item)$/, optCode: /^(code|id|ref|no\.?|#|defect code|defect no\.?)$/, optAt: /^(recorded at|record at|recorded by|applies to|level)$/ });
     if (!h) continue;
     let last = '';
     for (const r of s.rows.slice(h.row + 1)) {
@@ -207,7 +264,7 @@ function parseWorkbook(wb, fileName) {
       const d = String(r[h.cols.def] ?? '').trim();
       if (!d || !c) continue;
       last = c;
-      defects.push({ component: c, label: d, code: h.cols.optCode != null ? String(r[h.cols.optCode] ?? '').trim() : '' });
+      defects.push({ component: c, label: d, code: h.cols.optCode != null ? String(r[h.cols.optCode] ?? '').trim() : '', at: h.cols.optAt != null ? norm(r[h.cols.optAt]) : '' });
     }
     if (defects.length) break;
   }
@@ -243,7 +300,7 @@ function parseWorkbook(wb, fileName) {
   // first look for a "Unit" column on any sheet; use an "Address" column only if no sheet has one
   for (const unitTest of [UNIT_ONLY, ADDR_RE]) {
   if (units.length) break;
-  for (const s of [...sheets].filter(x => !isSchedSheet(x)).sort((a, b) => (/unit|address/i.test(b.name) ? 1 : 0) - (/unit|address/i.test(a.name) ? 1 : 0))) {
+  for (const s of [...sheets].filter(x => !isSchedSheet(x) && !isBldgSheet(x)).sort((a, b) => (/unit|address/i.test(b.name) ? 1 : 0) - (/unit|address/i.test(a.name) ? 1 : 0))) {
     const h = findHeader(s.rows, { unit: unitTest, optDesc: /^(address|description|location|notes|building|bldg|street address)$/, optSched: SCHED_RE });
     if (!h) continue;
     s.rows.slice(h.row + 1).forEach((r, ri) => {
@@ -271,6 +328,23 @@ function parseWorkbook(wb, fileName) {
       }
     }
   }
+  // Buildings (1.9.0): a sheet named "Buildings" (or "Bldgs") with a "Building" column, in the order to list them.
+  // Used only when roofs are recorded by building.
+  const buildings = [];
+  for (const s of sheets.filter(isBldgSheet)) {
+    const h = findHeader(s.rows, { unit: [/^(building|buildings|building #|building no\.?|building number|building name|bldg|bldg #|bldg no\.?)$/, /^(building|bldg)/], optDesc: /^(address|description|location|notes|street address)$/, optSched: SCHED_RE });
+    if (!h) continue;
+    s.rows.slice(h.row + 1).forEach((r, ri) => {
+      const b = String(r[h.cols.unit] ?? '').trim(); if (!b) return;
+      const desc = h.cols.optDesc != null ? String(r[h.cols.optDesc] ?? '').trim() : '';
+      const schedRaw = h.cols.optSched != null ? String(r[h.cols.optSched] ?? '').trim() : '';
+      const sched = h.cols.optSched != null ? schedValue(schedRaw, ri) : null;
+      if (!buildings.some(x => x.label === b)) buildings.push({ label: b, desc, sched, schedLabel: sched != null ? schedRaw : '', kind: 'building' });
+    });
+    if (buildings.length) break;
+  }
+  // Roofs by unit or by building: the Project sheet's "Roofs" row decides; with no row, a Buildings list means by building.
+  const roofBy = /build|bldg/.test(roofSetting) ? 'building' : /unit/.test(roofSetting) ? 'unit' : (buildings.length ? 'building' : 'unit');
   // Stable defect ids
   const seen = new Map();
   defects = defects.map(d => {
@@ -279,8 +353,15 @@ function parseWorkbook(wb, fileName) {
     return { ...d, id };
   });
   const components = [...new Set(defects.map(d => d.component))];
+  // Building components: the Defects sheet's "Recorded at" column if it says Building, otherwise the roof components.
+  let bldgComps = [];
+  if (roofBy === 'building') {
+    const marked = components.filter(c => defects.some(d => d.component === c && /build|bldg/.test(d.at)));
+    bldgComps = marked.length ? marked : components.filter(c => /^roof/i.test(c));
+  }
+  defects.forEach(d => delete d.at);
   if (!number) { const m = String(fileName || '').match(/^([A-Za-z0-9][A-Za-z0-9.\-]{1,20})[ _]/); if (m) number = m[1]; }
-  return { number, name, units, components, defects };
+  return { number, name, units, components, defects, roofBy, roofSetting, buildings: roofBy === 'building' ? buildings : [], ignoredBuildings: roofBy === 'building' ? 0 : buildings.length, bldgComps };
 }
 
 async function importProjectFile(file) {
@@ -296,6 +377,15 @@ async function importProjectFile(file) {
     const problems = [];
     if (!parsed.units.length) problems.push('No unit list found. Add a sheet with a column headed "Unit".');
     if (!parsed.defects.length) problems.push('No defect list found. Add a sheet with columns headed "Component" and "Defect".');
+    if (parsed.roofBy === 'building') {
+      if (!parsed.buildings.length) problems.push('Roofs are set to “By building”, but there’s no building list. Add a sheet named “Buildings” with a column headed “Building”.');
+      if (parsed.defects.length && !parsed.bldgComps.length) problems.push('Roofs are set to “By building”, but no component is named Roof (or Roofs). Name the roof component “Roof”, or mark its rows “Building” in a “Recorded at” column on the Defects sheet.');
+      if (parsed.bldgComps.length && parsed.bldgComps.length === parsed.components.length) problems.push('Every component is set to be recorded by building, so there would be nothing to record at units.');
+      const ul = new Set(parsed.units.map(u => u.label.toLowerCase()));
+      const both = parsed.buildings.filter(b => ul.has(b.label.toLowerCase())).map(b => b.label);
+      if (both.length) problems.push(`These names are used for both a unit and a building: ${both.slice(0, 5).join(', ')}${both.length > 5 ? ` and ${both.length - 5} more` : ''}. Every unit and building needs its own name (for example “Bldg 62”).`);
+      if (parsed.units.some(u => u.label.toLowerCase() === BLDG_DIR.toLowerCase())) problems.push(`A unit can’t be named “${BLDG_DIR}”: that’s the photo folder for buildings.`);
+    }
     if (problems.length) { alertSheet('Couldn’t import that file', problems.join('\n\n') + '\n\nThe template in the menu shows the expected layout.'); return; }
     confirmImport(parsed);
   } catch (e) {
@@ -352,6 +442,11 @@ async function mergeLists(old, parsed) {
 function confirmImport(parsed) {
   const existing = parsed.number && S.projects.find(p => p.number.toLowerCase() === parsed.number.toLowerCase());
   const nSched = parsed.units.filter(u => u.sched != null).length;
+  const byB = parsed.roofBy === 'building';
+  const unitComps = byB ? parsed.components.filter(c => !parsed.bldgComps.includes(c)) : parsed.components;
+  const wasB = existing && existing.roofBy === 'building';
+  const modeNote = existing && wasB !== byB
+    ? `<p class="note warn">This file changes roofs from <b>${wasB ? 'by building' : 'by unit'}</b> to <b>${byB ? 'by building' : 'by unit'}</b>. ${byB ? 'Roof results already recorded at units are kept on the phone and stay in the Observations sheet, but Roof is no longer offered at units.' : 'Buildings that already have results or photos are kept, marked “No longer in the import file”.'}</p>` : '';
   openSheet({
     title: existing ? 'Update project lists' : 'New project',
     body: `
@@ -360,8 +455,10 @@ function confirmImport(parsed) {
         <span class="hint">Used at the start of every photo name. Format: 267180.00, or 267180.00-RENO.</span>
         <span class="hint warn" id="pnum-warn" hidden>This doesn’t look like ######.## or ######.##-XXXX. You can still use it.</span></div>
       <div class="field"><label for="pname">Project name (optional)</label><input id="pname" value="${esc(parsed.name || (existing && existing.name) || '')}"></div>
-      <div class="kv"><span>Units</span><span>${parsed.units.length}</span><span>On the schedule</span><span>${nSched || 'None'}</span><span>Components</span><span>${parsed.components.length}</span><span>Defect conditions</span><span>${parsed.defects.length}</span></div>
-      <p class="note">${esc(parsed.components.join(', '))}</p>
+      <div class="kv"><span>Units</span><span>${parsed.units.length}</span><span>On the schedule</span><span>${nSched || 'None'}</span>${byB ? `<span>Buildings</span><span>${parsed.buildings.length}</span>` : ''}<span>Roofs recorded</span><span>${byB ? 'By building' : 'By unit'}</span><span>Components</span><span>${parsed.components.length}</span><span>Defect conditions</span><span>${parsed.defects.length}</span></div>
+      ${byB ? `<p class="note"><b>At units:</b> ${esc(unitComps.join(', '))}<br><b>At buildings:</b> ${esc(parsed.bldgComps.join(', '))}</p>` : `<p class="note">${esc(parsed.components.join(', '))}</p>`}
+      ${parsed.ignoredBuildings ? `<p class="note">The file has a list of ${parsed.ignoredBuildings} buildings, but roofs are set to “By unit”, so the buildings aren’t used. To record roofs by building, set <b>Roofs</b> to <b>By building</b> on the Project sheet.</p>` : ''}
+      ${modeNote}
       ${existing ? '<p class="note">A project with this number is already on this phone. Its lists will be updated from this file. Units, components and defects you added on site are kept, and so is anything that already has results or photos.</p>' : ''}`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="do-import">${existing ? 'Update lists' : 'Create project'}</button>`,
     mount(el, close) {
@@ -377,8 +474,13 @@ function confirmImport(parsed) {
         // check what's actually saved right now (not just what's in memory)
         const target = (await getAll('projects')).find(p => projNumKey(p.number) === projNumKey(number));
         const p = target || { id: uid(), createdAt: Date.now(), state: {} };
-        const m = await mergeLists(target, parsed);
-        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps, orphanComps: m.orphanComps });
+        const m = await mergeLists(target, { ...parsed, units: [...parsed.units, ...parsed.buildings] });
+        // building components: from the file, plus components added on site at a building
+        const oldB = (target && target.bldgComps) || [];
+        const keepB = m.units.some(isBldg);
+        const bldgComps = byB ? [...new Set([...parsed.bldgComps, ...oldB.filter(c => m.addedComps.includes(c))])].filter(c => m.components.includes(c))
+          : keepB ? oldB.filter(c => m.components.includes(c)) : [];
+        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps, orphanComps: m.orphanComps, roofBy: parsed.roofBy, bldgComps });
         await put('projects', { ...p, updatedAt: Date.now() });
         S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         await activate(S.projects.find(x => x.id === p.id));
@@ -687,7 +789,7 @@ async function onFilesChosen(e) {
 }
 function requireContext() {
   if (!S.project) { toast('Import a project first'); return false; }
-  if (!S.project.state.unit) { pickUnit(); return false; }
+  if (!S.project.state.unit) { pickUnit(curView()); return false; }
   if (!S.project.state.component) { pickComponent(); return false; }
   return true;
 }
@@ -1497,8 +1599,13 @@ function unitAnyData(label) {
   for (const o of S.obs.values()) if (o.unit === label && (o.value || o.notes)) return true;
   return S.photos.some(ph => ph.unit === label);
 }
-function pickUnit() {
-  const p = S.project; const comp = p.state.component;
+function pickUnit(kind) {
+  const p = S.project;
+  if (kind !== 'unit' && kind !== 'building') kind = curView();
+  const B = kind === 'building', word = B ? 'building' : 'unit';
+  // progress shown for the current component if it's offered here (Roof at buildings)
+  const offered = compsOfKind(kind);
+  const comp = offered.includes(p.state.component) ? p.state.component : offered.length === 1 ? offered[0] : null;
   const row = u => {
     const pr = comp ? unitProgress(u.label, comp) : null;
     const done = pr && pr.total && pr.n === pr.total;
@@ -1507,15 +1614,15 @@ function pickUnit() {
       <span>${u.sched != null ? `<span class="sched">${esc(/^\d+$/.test(u.schedLabel || '') ? u.schedLabel : '•')}</span>` : ''}${esc(u.label)}${subs ? `<span class="sub">${esc(subs)}</span>` : ''}</span>
       ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : (unitAnyData(u.label) ? '<span class="meta">•</span>' : '')}</button></li>`;
   };
-  const ordered = unitsInOrder();
+  const ordered = unitsInOrder(kind);
   const sch = ordered.filter(u => u.sched != null), rest = ordered.filter(u => u.sched == null);
   const body = sch.length
-    ? `<h3 class="list-h">Scheduled · ${sch.length}</h3><ul class="list">${sch.map(row).join('')}</ul><h3 class="list-h">Other units · ${rest.length}</h3><ul class="list">${rest.map(row).join('')}</ul>`
+    ? `<h3 class="list-h">Scheduled · ${sch.length}</h3><ul class="list">${sch.map(row).join('')}</ul><h3 class="list-h">Other ${word}s · ${rest.length}</h3><ul class="list">${rest.map(row).join('')}</ul>`
     : `<ul class="list">${rest.map(row).join('')}</ul>`;
   openSheet({
-    title: 'Which unit are you at?',
-    body: `<input class="search" type="search" placeholder="Search ${p.units.length} units" aria-label="Search units">${body}`,
-    foot: `<button class="btn ghost" id="add-unit">+ Add unit</button>`,
+    title: B ? 'Which building?' : 'Which unit are you at?',
+    body: `<input class="search" type="search" placeholder="Search ${ordered.length} ${word}s" aria-label="Search ${word}s">${body}`,
+    foot: `<button class="btn ghost" id="add-unit">+ Add ${word}</button>`,
     mount(el, close) {
       const s = $('.search', el);
       s.oninput = () => {
@@ -1525,10 +1632,10 @@ function pickUnit() {
       };
       el.querySelector('.sheet-body').addEventListener('click', async e => {
         const b = e.target.closest('[data-unit]'); if (!b) return;
-        p.state.unit = b.dataset.unit; await saveProject(); close(); render();
+        setEntry(b.dataset.unit); await saveProject(); close(); render();
         if (!p.state.component) pickComponent();
       });
-      $('#add-unit', el).onclick = () => { close(); addUnitSheet(s.value.trim()); };
+      $('#add-unit', el).onclick = () => { close(); addUnitSheet(s.value.trim(), kind); };
       const cur = el.querySelector('[aria-current="true"]'); cur && cur.scrollIntoView({ block: 'center' });
     }
   });
@@ -1537,7 +1644,7 @@ function pickComponent() {
   const p = S.project; const unit = p.state.unit;
   openSheet({
     title: 'Which component?',
-    body: `<ul class="list">${p.components.map(c => {
+    body: `<ul class="list">${compsOfKind(curView()).map(c => {
       const pr = unit ? unitProgress(unit, c) : null; const done = pr && pr.total && pr.n === pr.total;
       return `<li><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}${isAddedComp(c) ? '<span class="sub">Added on site</span>' : isOrphanComp(c) ? '<span class="sub">No longer in the import file</span>' : ''}</span>
         ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : ''}</button></li>`;
@@ -1555,26 +1662,31 @@ function pickComponent() {
 }
 
 /* ---------- adding to the lists on site ---------- */
-function addUnitSheet(prefill) {
+function addUnitSheet(prefill, kind) {
   const p = S.project;
+  if (kind !== 'building' || !hasBldgs()) kind = 'unit';
+  const B = kind === 'building', W = B ? 'Building' : 'Unit', w = B ? 'building' : 'unit';
   openSheet({
-    title: 'Add a unit',
-    body: `<div class="field"><label for="nu-l">Unit</label><input id="nu-l" value="${esc(prefill || '')}" autocomplete="off" placeholder="e.g. 105"><span class="hint">Also used as the photo folder name.</span></div>
+    title: 'Add a ' + w,
+    body: `<div class="field"><label for="nu-l">${W}</label><input id="nu-l" value="${esc(prefill || '')}" autocomplete="off" placeholder="${B ? 'e.g. Bldg 12' : 'e.g. 105'}"><span class="hint">Also used as the photo folder name.</span></div>
       <div class="field"><label for="nu-d">Address or description (optional)</label><input id="nu-d" autocomplete="off"></div>
       <label class="check"><input type="checkbox" id="nu-s"> Add to the end of the schedule</label>
-      <p class="note">Units you add can be deleted later from Menu → Edit lists. Units from the import file are protected.</p>`,
-    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nu-go">Add unit</button>`,
+      <p class="note">${W}s you add can be deleted later from Menu → Edit lists. ${W}s from the import file are protected.</p>`,
+    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nu-go">Add ${w}</button>`,
     mount(el, close) {
       const inp = $('#nu-l', el); inp.focus();
       $('#nu-go', el).onclick = async () => {
         const label = inp.value.trim();
-        if (!label) { inp.focus(); toast('Enter a unit'); return; }
-        if (p.units.some(u => u.label.toLowerCase() === label.toLowerCase())) { toast(`Unit ${label} is already in the list`); return; }
-        const maxS = Math.max(0, ...p.units.filter(u => u.sched != null).map(u => u.sched));
+        if (!label) { inp.focus(); toast('Enter a ' + w); return; }
+        const dup = p.units.find(u => u.label.toLowerCase() === label.toLowerCase());
+        if (dup) { toast(`${isBldg(dup) ? 'Building' : 'Unit'} ${label} is already in the list`); return; }
+        if (hasBldgs() && label.toLowerCase() === BLDG_DIR.toLowerCase()) { toast(`“${BLDG_DIR}” is the photo folder for buildings: use another name`); return; }
+        const same = p.units.filter(u => isBldg(u) === B);
+        const maxS = Math.max(0, ...same.filter(u => u.sched != null).map(u => u.sched));
         const sched = $('#nu-s', el).checked ? maxS + 1 : null;
-        p.units.push({ label, desc: $('#nu-d', el).value.trim(), sched, schedLabel: sched != null ? 'added' : '', added: true });
-        p.state.unit = label; await saveProject(); close(); render();
-        toast(`Unit ${label} added`);
+        p.units.push({ label, desc: $('#nu-d', el).value.trim(), sched, schedLabel: sched != null ? 'added' : '', added: true, ...(B ? { kind: 'building' } : {}) });
+        setEntry(label); await saveProject(); close(); render();
+        toast(`${W} ${label} added`);
         if (!p.state.component) pickComponent();
       };
     }
@@ -1585,7 +1697,7 @@ function addComponentSheet() {
   openSheet({
     title: 'Add a component',
     body: `<div class="field"><label for="nc-l">Component</label><input id="nc-l" autocomplete="off" placeholder="e.g. Decks"></div>
-      <p class="note">After adding it, add its defect conditions from the bottom of the list.</p>`,
+      <p class="note">${isBldgLabel(p.state.unit) ? 'It’s added for buildings only. ' : bldgMode() ? 'It’s added for units only. ' : ''}After adding it, add its defect conditions from the bottom of the list.</p>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nc-go">Add component</button>`,
     mount(el, close) {
       const inp = $('#nc-l', el); inp.focus();
@@ -1594,6 +1706,7 @@ function addComponentSheet() {
         if (!c) { inp.focus(); toast('Enter a component'); return; }
         if (p.components.some(x => x.toLowerCase() === c.toLowerCase())) { toast(`${c} is already in the list`); return; }
         p.components.push(c); p.addedComps.push(c); p.state.component = c;
+        if (isBldgLabel(p.state.unit)) p.bldgComps = [...(p.bldgComps || []), c];   // added at a building: a building component
         await saveProject(); close(); render(); toast(`${c} added`);
         if (!p.state.unit) pickUnit(); else addDefectSheet();
       };
@@ -1607,7 +1720,7 @@ function addDefectSheet() {
     body: `<p class="note">Component: <b>${esc(comp)}</b></p>
       <div class="field"><label for="nd-l">Defect condition</label><input id="nd-l" autocomplete="off" placeholder="e.g. Sealant missing at penetration"></div>
       <div class="field"><label for="nd-c">Code (optional)</label><input id="nd-c" autocomplete="off" autocapitalize="characters" placeholder="e.g. ST-9"></div>
-      <p class="note">It’s added for every unit. Conditions you add can be deleted later; ones from the import file are protected.</p>`,
+      <p class="note">It’s added for every ${isBldgComp(comp) ? 'building' : 'unit'}. Conditions you add can be deleted later; ones from the import file are protected.</p>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nd-go">Add condition</button>`,
     mount(el, close) {
       const inp = $('#nd-l', el); inp.focus();
@@ -1627,31 +1740,33 @@ function addDefectSheet() {
 }
 function editListsSheet() {
   const p = S.project;
-  const lockedU = p.units.filter(u => !u.added && !u.orphan).length, lockedC = p.components.filter(c => !isAddedComp(c) && !isOrphanComp(c)).length, lockedD = p.defects.filter(d => !d.added && !d.orphan).length;
+  const lockedU = p.units.filter(u => !isBldg(u) && !u.added && !u.orphan).length, lockedB = p.units.filter(u => isBldg(u) && !u.added && !u.orphan).length, lockedC = p.components.filter(c => !isAddedComp(c) && !isOrphanComp(c)).length, lockedD = p.defects.filter(d => !d.added && !d.orphan).length;
   const draw = el => {
-    const au = p.units.filter(u => u.added || u.orphan), ac = p.components.filter(c => isAddedComp(c) || isOrphanComp(c)), ad = p.defects.filter(d => d.added || d.orphan);
+    const au = p.units.filter(u => !isBldg(u) && (u.added || u.orphan)), ab = p.units.filter(u => isBldg(u) && (u.added || u.orphan)), ac = p.components.filter(c => isAddedComp(c) || isOrphanComp(c)), ad = p.defects.filter(d => d.added || d.orphan);
     const why = x => x === true ? 'No longer in the import file' : '';
     const row = (label, sub, attr) => `<div class="link-row"><span>${esc(label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span><span class="acts"><button class="mini" ${attr}>Delete</button></span></div>`;
     $('.sheet-body', el).innerHTML = `
-      <p class="note">🔒 ${lockedU} units, ${lockedC} components and ${lockedD} conditions come from the import file and can’t be deleted here. Below are items added on site, and items that are no longer in the import file but were kept because they had data.</p>
+      <p class="note">🔒 ${lockedU} units, ${hasBldgs() ? lockedB + ' buildings, ' : ''}${lockedC} components and ${lockedD} conditions come from the import file and can’t be deleted here. Below are items added on site, and items that are no longer in the import file but were kept because they had data.</p>
       <div class="section-h">Units</div>${au.length ? au.map(u => row(u.label, [u.desc, u.orphan ? 'No longer in the import file' : 'Added on site'].filter(Boolean).join(' · '), `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}
+      ${hasBldgs() ? `<div class="section-h">Buildings</div>${ab.length ? ab.map(u => row(u.label, [u.desc, u.orphan ? 'No longer in the import file' : 'Added on site'].filter(Boolean).join(' · '), `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}` : ''}
       <div class="section-h">Components</div>${ac.length ? ac.map(c => row(c, isOrphanComp(c) ? 'No longer in the import file' : 'Added on site', `data-dc="${esc(c)}"`)).join('') : '<p class="note">None</p>'}
       <div class="section-h">Conditions</div>${ad.length ? ad.map(d => row((d.code ? d.code + ' ' : '') + d.label, d.component + ' · ' + (d.orphan ? 'No longer in the import file' : 'Added on site'), `data-dd="${d.id}"`)).join('') : '<p class="note">None</p>'}`;
   };
   openSheet({
     title: 'Edit lists', body: '',
-    foot: `<button class="btn ghost" id="el-u">+ Unit</button><button class="btn ghost" id="el-c">+ Component</button>`,
+    foot: `<button class="btn ghost" id="el-u">+ Unit</button>${hasBldgs() ? '<button class="btn ghost" id="el-b">+ Building</button>' : ''}<button class="btn ghost" id="el-c">+ Component</button>`,
     mount(el, close) {
       draw(el);
-      $('#el-u', el).onclick = () => { close(); addUnitSheet(); };
+      $('#el-u', el).onclick = () => { close(); addUnitSheet('', 'unit'); };
+      const eb = $('#el-b', el); if (eb) eb.onclick = () => { close(); addUnitSheet('', 'building'); };
       $('#el-c', el).onclick = () => { close(); addComponentSheet(); };
       el.querySelector('.sheet-body').addEventListener('click', async e => {
         const b = e.target.closest('[data-du],[data-dc],[data-dd]'); if (!b) return;
         if (b.dataset.du != null) {
-          const label = b.dataset.du;
-          if (S.photos.some(ph => ph.unit === label)) { alertSheet('Can’t delete this unit yet', `Unit ${label} has photos. Delete or keep its photos first — deleting the unit would leave them without a folder.`); return; }
+          const label = b.dataset.du, W = kindWord(label), w = W.toLowerCase();
+          if (S.photos.some(ph => ph.unit === label)) { alertSheet(`Can’t delete this ${w} yet`, `${W} ${label} has photos. Delete or keep its photos first — deleting the ${w} would leave them without a folder.`); return; }
           const has = [...S.obs.values()].some(o => o.unit === label && (o.value || o.notes));
-          if (!await confirmSheet(`Delete unit ${label}?`, has ? `Its recorded results and notes will be deleted too.` : 'It has no results yet.', 'Delete', true)) return;
+          if (!await confirmSheet(`Delete ${w} ${label}?`, has ? `Its recorded results and notes will be deleted too.` : 'It has no results yet.', 'Delete', true)) return;
           await deleteObsWhere(o => o.unit === label);
           p.units = p.units.filter(u => u.label !== label); if (p.state.unit === label) p.state.unit = null;
         }
@@ -1662,7 +1777,7 @@ function editListsSheet() {
           if (!await confirmSheet(`Delete ${c}?`, 'Its added conditions and any results for them will be deleted too.', 'Delete', true)) return;
           const ids = new Set(p.defects.filter(d => d.component === c).map(d => d.id));
           await deleteObsWhere(o => ids.has(o.defectId) || o.defectId === generalId(c));
-          p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c); p.orphanComps = (p.orphanComps || []).filter(x => x !== c);
+          p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c); p.orphanComps = (p.orphanComps || []).filter(x => x !== c); p.bldgComps = (p.bldgComps || []).filter(x => x !== c);
           if (p.state.component === c) p.state.component = null;
         }
         if (b.dataset.dd != null) {
@@ -1685,10 +1800,10 @@ async function deleteObsWhere(fn) {
   await txDone(t);
 }
 async function stepUnit(dir) {
-  const p = S.project; const order = unitsInOrder(); const i = order.findIndex(u => u.label === p.state.unit);
+  const p = S.project; const order = unitsInOrder(curView()); const i = order.findIndex(u => u.label === p.state.unit);
   const n = order[i + dir]; if (!n) return;
-  p.state.unit = n.label; await saveProject(); render(); window.scrollTo(0, 0);
-  toast('Unit ' + n.label);
+  setEntry(n.label); await saveProject(); render(); window.scrollTo(0, 0);
+  toast(kindWord(n.label) + ' ' + n.label);
 }
 
 /* ================= Link sheet (photo-first) ================= */
@@ -1700,7 +1815,7 @@ function linkSheet(photos, fresh) {
   openSheet({
     title: fresh ? (n > 1 ? `${n} photos saved — link them?` : 'Photo saved — link it?') : `Link ${n} photo${n > 1 ? 's' : ''}`,
     body: `<div class="preview-strip">${photos.map(p => thumbHTML(p)).join('')}</div>
-      <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this unit’s folder.</p>
+      <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this ${kindWord(unit).toLowerCase()}’s folder.</p>
       <div>${ds.map(d => {
         const o = getObs(unit, d.id);
         return `<div class="link-row"><span>${d.code ? `<b>${esc(d.code)}</b> ` : ''}${esc(d.label)} ${o && o.value ? `<span class="vchip" data-v="${o.value}">${o.value}</span>` : ''}</span>
@@ -1729,7 +1844,7 @@ function openTray() {
   const draw = (el) => {
     const ps = trayPhotos();
     $('.sheet-body', el).innerHTML = ps.length
-      ? `<p class="note">Unlinked photos at unit <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. Taken at the wrong unit? Select them and tap <b>Move</b>.</p>
+      ? `<p class="note">Unlinked photos at ${kindWord(ctx().unit).toLowerCase()} <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. Taken at the wrong ${hasBldgs() ? 'unit or building' : 'unit'}? Select them and tap <b>Move</b>.</p>
          ${trayGroupsHTML(ps, p => thumbHTML(p, { selectable: true, badge: '#' + p.seq }))}`
       : `<div class="empty"><h2>No unlinked photos</h2>Photos taken with the big camera button land here until you link them.</div>`;
     const n = S.selecting.size;
@@ -1750,13 +1865,13 @@ function openTray() {
         if (e.target.id === 't-link') { const ps = [...S.selecting].map(photoById).filter(Boolean); close(); linkSheet(ps, false); }
         if (e.target.id === 't-move') {
           const ps = [...S.selecting].map(photoById).filter(Boolean);
-          const to = await chooseUnit(`Move ${ps.length} photo${ps.length > 1 ? 's' : ''} to which unit?`, ctx().unit);
+          const to = await chooseUnit(`Move ${ps.length} photo${ps.length > 1 ? 's' : ''} to which ${hasBldgs() ? 'unit or building' : 'unit'}?`, ctx().unit);
           if (!to) return;
           const from = ctx().unit, r = await movePhotosToUnit(ps, to);
           S.selecting.clear(); draw(el); render();
           const pl = n => `${n} photo${n === 1 ? '' : 's'}`;
-          if (r.moved) toast(`Moved ${pl(r.moved)} to unit ${to}`);
-          if (r.removed) alertSheet('Some photos stayed here', `${pl(r.removed)} ${r.removed === 1 ? 'was' : 'were'} already exported and removed from this phone (Free up space), so ${r.removed === 1 ? 'it stays' : 'they stay'} in unit ${from}, where ${r.removed === 1 ? 'it was' : 'they were'} exported.`);
+          if (r.moved) toast(`Moved ${pl(r.moved)} to ${kindWord(to).toLowerCase()} ${to}`);
+          if (r.removed) alertSheet('Some photos stayed here', `${pl(r.removed)} ${r.removed === 1 ? 'was' : 'were'} already exported and removed from this phone (Free up space), so ${r.removed === 1 ? 'it stays' : 'they stay'} in ${kindWord(from).toLowerCase()} ${from}, where ${r.removed === 1 ? 'it was' : 'they were'} exported.`);
           else if (!r.moved) toast('Nothing was moved');
         }
         if (e.target.id === 't-del') {
@@ -1777,16 +1892,18 @@ function openTray() {
 function chooseUnit(title, exclude) {
   return new Promise(res => {
     let done = false;
-    const order = unitsInOrder().filter(u => u.label !== exclude);
+    const order = unitsInOrder('unit').filter(u => u.label !== exclude);
+    const bl = unitsInOrder('building').filter(u => u.label !== exclude);
     const row = u => `<li data-q="${esc((u.label + ' ' + (u.desc || '')).toLowerCase())}"><button data-pick-unit="${esc(u.label)}">
       <span>${u.sched != null ? `<span class="sched">${esc(/^\d+$/.test(u.schedLabel || '') ? u.schedLabel : '•')}</span>` : ''}${esc(u.label)}${u.desc ? `<span class="sub">${esc(u.desc)}</span>` : ''}</span>
       <span class="meta">›</span></button></li>`;
     const sch = order.filter(u => u.sched != null), rest = order.filter(u => u.sched == null);
     openSheet({
       title,
-      body: `<input class="search" type="search" placeholder="Search ${order.length} units" aria-label="Search units">
-        ${sch.length ? `<h3 class="list-h">Scheduled · ${sch.length}</h3><ul class="list">${sch.map(row).join('')}</ul><h3 class="list-h">Other units · ${rest.length}</h3>` : ''}
-        <ul class="list">${rest.map(row).join('')}</ul>`,
+      body: `<input class="search" type="search" placeholder="Search ${order.length} units${bl.length ? ` and ${bl.length} buildings` : ''}" aria-label="Search">
+        ${sch.length ? `<h3 class="list-h">Scheduled · ${sch.length}</h3><ul class="list">${sch.map(row).join('')}</ul><h3 class="list-h">Other units · ${rest.length}</h3>` : bl.length ? `<h3 class="list-h">Units · ${rest.length}</h3>` : ''}
+        <ul class="list">${rest.map(row).join('')}</ul>
+        ${bl.length ? `<h3 class="list-h">Buildings · ${bl.length}</h3><ul class="list">${bl.map(row).join('')}</ul>` : ''}`,
       foot: `<button class="btn ghost" data-close>Cancel</button>`,
       mount(el, close) {
         const s = $('.search', el);
@@ -1820,7 +1937,7 @@ async function movePhotosToUnit(photos, unit) {
 /* ================= Defective conditions with no photo ================= */
 function missingList() {
   if (!S.project) return [];
-  const rank = new Map(unitsInOrder().map((u, i) => [u.label, i]));
+  const rank = new Map([...unitsInOrder('unit'), ...unitsInOrder('building')].map((u, i) => [u.label, i]));
   const dIdx = new Map(S.project.defects.map((d, i) => [d.id, i]));
   return [...S.obs.values()]
     .filter(o => o.value === '1' && !(o.photoIds || []).length && !isGeneral(o.defectId) && defectById(o.defectId))
@@ -1832,7 +1949,7 @@ function missingSheet() {
   openSheet({
     title: 'Defective, no photo',
     body: list.length ? `<p class="note">${list.length} condition${list.length > 1 ? 's are' : ' is'} marked 1 with no photo linked. Tap one to go to it.</p>
-      <ul class="list">${list.map((m, i) => `<li><button data-mi="${i}"><span><b>Unit ${esc(m.unit)}</b><span class="sub">${esc(m.d.component)} · ${m.d.code ? esc(m.d.code) + ' ' : ''}${esc(m.d.label)}</span></span><span class="meta">›</span></button></li>`).join('')}</ul>`
+      <ul class="list">${list.map((m, i) => `<li><button data-mi="${i}"><span><b>${kindWord(m.unit)} ${esc(m.unit)}</b><span class="sub">${esc(m.d.component)} · ${m.d.code ? esc(m.d.code) + ' ' : ''}${esc(m.d.label)}</span></span><span class="meta">›</span></button></li>`).join('')}</ul>`
       : '<p>Every defective condition has a photo linked.</p>',
     foot: '<button class="btn" data-close>Close</button>',
     mount(el, close) { el.addEventListener('click', e => { const b = e.target.closest('[data-mi]'); if (b) { close(); goToMissing(list[+b.dataset.mi].key); } }); }
@@ -1846,7 +1963,7 @@ async function goToMissing(key) {
   if (!m) { hideMissNav(); toast('Every defective condition now has a photo'); return; }
   document.querySelectorAll('#sheet-root .scrim [data-close]').forEach(b => b.click());
   missKey = m.key; missIdx = i;
-  S.project.state.unit = m.unit; S.project.state.component = m.d.component; await saveProject(); render();
+  setEntry(m.unit); S.project.state.component = m.d.component; await saveProject(); render();
   showMissNav(i, list.length);
   requestAnimationFrame(() => {
     const sec = document.querySelector(`.defect[data-d="${CSS.escape(m.d.id)}"]`);
@@ -1897,7 +2014,7 @@ function loadReceipt() {
       const live = pr.id === (S.project && S.project.id) ? S.photos : await byProject('photos', pr.id);
       for (const ph of live) {
         if (ph.removed) continue;
-        const path = photoPath(ph);
+        const path = photoPath(ph, pr);
         if (have.get(path) === ph.size) { if (!isConfirmed(ph)) { ph.rcv = { path, size: ph.size, at, made: r.created || '' }; t.objectStore('photos').put(ph); } yes++; }
         else notYet++;
       }
@@ -2068,18 +2185,21 @@ function render() {
   const app = $('#app');
   if (!S.settings.initials || !S.project) { renderWelcome(app); return; }
   const p = S.project; const st = p.state;
-  const order = unitsInOrder();
+  const view = curView(), B = view === 'building';
+  const order = unitsInOrder(view);
   const ui = order.findIndex(u => u.label === st.unit);
   const unit = order[ui];
+  const W = B ? 'Building' : 'Unit';
   const schedTag = unit && unit.sched != null ? `Scheduled${unit.schedLabel && unit.schedLabel !== 'added' ? ' · ' + unit.schedLabel : ''}` : '';
   app.innerHTML = `
     <header class="tag">
       <div class="tag-top"><span class="proj">${esc(p.number)}${p.name ? ' · ' + esc(p.name) : ''} · ${esc(S.settings.initials)}</span>
         <button class="icon-btn" id="menu" aria-label="Menu">☰</button></div>
+      ${hasBldgs() ? `<div class="view-seg" role="tablist" aria-label="Units or buildings"><button role="tab" data-view="unit" aria-selected="${!B}">Units</button><button role="tab" data-view="building" aria-selected="${B}">Buildings${p.bldgComps && p.bldgComps.length ? ' · ' + esc(p.bldgComps.join(', ')) : ''}</button></div>` : ''}
       <div class="tag-unit">
-        <button class="step" id="prev" aria-label="Previous unit" ${ui <= 0 ? 'disabled' : ''}>‹</button>
-        <button class="unit-btn" id="unit"><span class="lbl">Unit</span><span class="val">${unit ? esc(unit.label) : 'Select unit'}</span>${unit && (unit.desc || schedTag) ? `<span class="sub">${esc([unit.desc, schedTag].filter(Boolean).join(' · '))}</span>` : ''}</button>
-        <button class="step" id="next" aria-label="Next unit" ${ui < 0 || ui >= order.length - 1 ? 'disabled' : ''}>›</button>
+        <button class="step" id="prev" aria-label="Previous ${W.toLowerCase()}" ${ui <= 0 ? 'disabled' : ''}>‹</button>
+        <button class="unit-btn${B ? ' bldg' : ''}" id="unit"><span class="lbl">${W}</span><span class="val${unit && unit.label.length > 14 ? ' long' : ''}">${unit ? esc(unit.label) : 'Select ' + W.toLowerCase()}</span>${unit && (unit.desc || schedTag) ? `<span class="sub">${esc([unit.desc, schedTag].filter(Boolean).join(' · '))}</span>` : ''}</button>
+        <button class="step" id="next" aria-label="Next ${W.toLowerCase()}" ${ui < 0 || ui >= order.length - 1 ? 'disabled' : ''}>›</button>
       </div>
       <div class="comp-row"><button class="comp-btn" id="comp"><span>${st.component ? esc(st.component) : 'Select component'}</span><span class="chev">▾</span></button>
         <span class="progress" id="progress"></span></div>
@@ -2092,7 +2212,8 @@ function render() {
       <button class="side" id="export">Export</button>
     </nav>`;
   $('#menu').onclick = openMenu;
-  $('#unit').onclick = pickUnit;
+  $('#unit').onclick = () => pickUnit(view);
+  document.querySelectorAll('.view-seg [data-view]').forEach(b => b.onclick = () => switchView(b.dataset.view));
   $('#comp').onclick = pickComponent;
   $('#prev').onclick = () => stepUnit(-1);
   $('#next').onclick = () => stepUnit(1);
@@ -2131,9 +2252,10 @@ function renderList() {
   const list = $('#list'); if (!list) return;
   const st = S.project.state;
   if (!st.unit || !st.component) {
-    list.innerHTML = `<div class="empty"><h2>${!st.unit ? 'Pick the unit you’re at' : 'Pick a component'}</h2>
-      <button class="btn" style="max-width:280px;margin-top:12px" id="pick">${!st.unit ? 'Choose unit' : 'Choose component'}</button></div>`;
-    $('#pick').onclick = !st.unit ? pickUnit : pickComponent;
+    const B = curView() === 'building';
+    list.innerHTML = `<div class="empty"><h2>${!st.unit ? (B ? 'Pick a building' : 'Pick the unit you’re at') : 'Pick a component'}</h2>
+      <button class="btn" style="max-width:280px;margin-top:12px" id="pick">${!st.unit ? (B ? 'Choose building' : 'Choose unit') : 'Choose component'}</button></div>`;
+    $('#pick').onclick = !st.unit ? () => pickUnit(curView()) : pickComponent;
     return;
   }
   const ds = defectsFor(st.component);
@@ -2143,7 +2265,7 @@ function renderList() {
     + ds.map(defectHTML).join('') + `
     <button class="add-row" id="add-defect">+ Add defect condition to ${esc(st.component)}</button>
     <section class="defect general"><h3 class="d-title">General notes — ${esc(st.unit)} · ${esc(st.component)}</h3>
-      <textarea class="notes" data-note="${gid}" placeholder="Anything else at this unit for this component">${esc(g ? g.notes : '')}</textarea></section>`;
+      <textarea class="notes" data-note="${gid}" placeholder="Anything else at this ${kindWord(st.unit).toLowerCase()} for this component">${esc(g ? g.notes : '')}</textarea></section>`;
   $('#add-defect').onclick = addDefectSheet;
   hydrateThumbs(list);
 }
@@ -2167,11 +2289,11 @@ document.addEventListener('input', e => { const t = e.target.closest('[data-note
 
 function attachToDefect(defectId) {
   const ps = trayPhotos(); const d = defectById(defectId);
-  if (!ps.length) { toast('No unlinked photos at this unit — use the big camera button first'); return; }
+  if (!ps.length) { toast(`No unlinked photos at this ${kindWord(ctx().unit).toLowerCase()} — use the big camera button first`); return; }
   const chosen = new Set();
   openSheet({
     title: 'Link unlinked photos',
-    body: `<p class="note">Pick the photos that prove <b>${esc(d.label)}</b>. Unlinked photos from every component at this unit are shown.</p><div id="pick-grid"></div>`,
+    body: `<p class="note">Pick the photos that prove <b>${esc(d.label)}</b>. Unlinked photos from every component at this ${kindWord(ctx().unit).toLowerCase()} are shown.</p><div id="pick-grid"></div>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="go" disabled>Link</button>`,
     mount(el, close) {
       const grid = $('#pick-grid', el);
@@ -2241,7 +2363,7 @@ function openProjects() {
   openSheet({
     title: 'Projects',
     body: `<ul class="list">${S.projects.map(p => `<li><button data-p="${p.id}" aria-current="${S.project && p.id === S.project.id}">
-      <span>${esc(p.number)}${p.name ? ' · ' + esc(p.name) : ''}<span class="sub">${p.units.length} units · ${p.defects.length} conditions</span></span>
+      <span>${esc(p.number)}${p.name ? ' · ' + esc(p.name) : ''}<span class="sub">${p.units.filter(u => !isBldg(u)).length} units · ${p.units.some(isBldg) ? p.units.filter(isBldg).length + ' buildings · ' : ''}${p.defects.length} conditions</span></span>
       <span class="meta">${S.project && p.id === S.project.id ? 'Open' : '›'}</span></button></li>`).join('')}</ul>
       <p class="note" style="margin-top:12px">To change a project’s units or defects, edit its Excel file and import it again with the same project number. Results and photos are kept.</p>`,
     foot: `<button class="btn ghost" id="p-del">Delete current…</button><button class="btn" id="p-imp">Import Excel</button>`,
@@ -2344,7 +2466,7 @@ function appModelParts() {
     inspector: o.inspector || '', updatedAt: o.updatedAt || 0 }));
   const photos = S.photos.map(x => ({ name: x.name, path: photoPath(x), kind: x.kind || 'photo', origName: origNameOf(x), unit: x.unit, component: x.component,
     defectIds: x.defectIds || [], takenAt: x.takenAt, initials: x.initials || '', takenDuring: x.takenDuring || '', movedFrom: x.movedFrom || '', size: x.size || 0 }));
-  const project = { number: p.number, name: p.name || '', units: p.units, components: p.components, defects: p.defects };
+  const project = { number: p.number, name: p.name || '', units: p.units, components: p.components, defects: p.defects, roofBy: p.roofBy || 'unit', bldgComps: p.bldgComps || [] };
   return { project, obs, photos };
 }
 // What each unit + condition looks like right now (only ones with something recorded).
@@ -2648,7 +2770,8 @@ function shareStep(steps) {
 /* ================= Template + demo ================= */
 function templateWorkbook() {
   const wb = XLSX.utils.book_new();
-  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '267180.00'], ['Project Name', 'Example Condominiums'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Number units in the Schedule column (1, 2, 3…) to put them first, in visit order. Leave it blank for units not on the schedule.']]);
+  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '267180.00'], ['Project Name', 'Example Condominiums'], ['Roofs', 'By unit'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Number units in the Schedule column (1, 2, 3…) to put them first, in visit order. Leave it blank for units not on the schedule.'],
+    ['Roofs: “By unit” records the Roof component at each unit. “By building” records it at buildings instead: list the buildings on the Buildings sheet (in the order to show them). Units then don’t offer Roof, and buildings offer only Roof.']]);
   proj['!cols'] = [{ wch: 18 }, { wch: 40 }];
   proj.B1.z = '@';   // text, so Excel keeps 267180.00 instead of turning it into 267180
   const units = XLSX.utils.aoa_to_sheet([['Unit', 'Address', 'Schedule'], ['101', '1200 Example Way #101', ''], ['102', '1200 Example Way #102', 2], ['103', '1200 Example Way #103', ''], ['201', '1200 Example Way #201', 1], ['202', '1200 Example Way #202', ''], ['203', '1200 Example Way #203', 3]]);
@@ -2657,7 +2780,10 @@ function templateWorkbook() {
   defects['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 60 }];
   XLSX.utils.book_append_sheet(wb, proj, 'Project');
   XLSX.utils.book_append_sheet(wb, units, 'Units');
+  const bldgs = XLSX.utils.aoa_to_sheet([['Building', 'Description', 'Schedule']]);
+  bldgs['!cols'] = [{ wch: 24 }, { wch: 32 }, { wch: 10 }];
   XLSX.utils.book_append_sheet(wb, defects, 'Defects');
+  XLSX.utils.book_append_sheet(wb, bldgs, 'Buildings');
   return wb;
 }
 const DEMO_DEFECTS = [

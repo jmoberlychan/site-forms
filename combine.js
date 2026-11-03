@@ -237,7 +237,9 @@ function buildCombinedModel(sheets, resolutions, now) {
   const units = base.units.map(u => ({ ...u })), unitSet = new Set(units.map(u => u.label));
   const defects = base.defects.map(d => ({ ...d })), defMap = new Map(defects.map(d => [d.id, d]));
   const components = [...base.components];
+  const bldgComps = [...(base.bldgComps || [])];                     // 1.9.0: components recorded at buildings
   for (const s of srcs.slice(1)) {
+    for (const c of s.data.project.bldgComps || []) if (!bldgComps.includes(c)) bldgComps.push(c);
     for (const u of s.data.project.units) if (!unitSet.has(u.label)) { units.push({ ...u }); unitSet.add(u.label); }
     for (const d of s.data.project.defects) if (!defMap.has(d.id)) { const c = { ...d }; defects.push(c); defMap.set(d.id, c); }
     for (const c of s.data.project.components) if (!components.includes(c)) components.push(c);
@@ -284,7 +286,7 @@ function buildCombinedModel(sheets, resolutions, now) {
   const changeLog = srcs.flatMap(s => s.data.log || []);
   const inspectors = [...new Set(srcs.map(s => s.data.inspector))].sort();
   return {
-    project: { number: base.number, name: base.name, units, components, defects },
+    project: { number: base.number, name: base.name, units, components, defects, roofBy: base.roofBy || 'unit', bldgComps },
     obs, photos, changeLog, conflicts,
     meta: { combined: true, exportedAt: now, inspectors, sources: srcs.map(s => ({ by: s.data.inspector, file: s.name, at: s.data.exportedAt })) },
   };
