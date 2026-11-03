@@ -470,3 +470,26 @@ html.in-browser .tag { top: var(--bb-h, 32px); }
 .steps li { margin: 6px 0; }
 .ico-share { width: 20px; height: 20px; vertical-align: -4px; color: var(--focus); }
 .fname { word-break: normal; overflow-wrap: anywhere; }
+
+/* ---------- 1.10.0: typed answers, items (windows / doors), editing added items ---------- */
+.answer { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+.choices { display: flex; flex-wrap: wrap; gap: 6px; }
+.choices .res { flex: 1 1 auto; min-width: 30%; font-size: 15px; padding: 8px 10px; }
+.na-nr { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ans-row { display: flex; gap: 10px; align-items: center; }
+.ans-in { width: 100%; min-height: 48px; border: 1.5px solid var(--line); border-radius: var(--radius); padding: 10px 12px; font-size: 18px; background: var(--card); color: var(--ink); }
+.ans-in:focus { border-color: var(--ink); outline: none; }
+.ans-row .ans-in { flex: 1; }
+.ans-dec { flex: 0 0 auto; color: var(--muted); font-size: 15px; white-space: nowrap; }
+.item-bar { display: flex; gap: 6px; align-items: stretch; margin: 2px 0 12px; padding: 8px; border-radius: var(--radius); background: var(--card); border: 1px solid var(--line); }
+.item-bar .step { background: var(--paper); color: var(--ink); }
+.item-bar .btn { width: auto; flex: 0 0 auto; min-height: 44px; padding: 0 12px; font-size: 15px; }
+.item-btn { flex: 1; min-width: 0; text-align: left; border: 0; background: transparent; color: var(--ink); padding: 0 4px; }
+.item-btn .lbl { display: block; font-size: 12px; color: var(--muted); }
+.item-btn .val { display: block; font-size: 20px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-row { display: flex; gap: 6px; align-items: center; }
+.item-row > button:first-child { flex: 1; min-width: 0; }
+.edit-added { cursor: pointer; background: transparent; font: inherit; font-size: 12px; font-weight: 600; }
+.btn.red-text { color: var(--r1); }
+.list .item-row .mini { width: auto; flex: 0 0 auto; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; justify-content: center; }
+.list .item-row .mini.red { border-color: var(--r1); }

@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.9.2';
+const APP_VERSION = '1.10.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -52,7 +52,7 @@ const thumbURL = new Map();
 
 function obsKey(unit, defectId) { return S.project.id + '|' + unit + '|' + defectId; }
 function getObs(unit, defectId) { return S.obs.get(obsKey(unit, defectId)); }
-function ctx() { const p = S.project; return { unit: p.state.unit, component: p.state.component }; }
+function ctx() { const p = S.project; return { unit: p.state.unit, component: p.state.component, item: curItem() }; }
 
 async function saveSettings() { await put('meta', { k: 'settings', ...S.settings }); }
 async function saveProject() { S.project.updatedAt = Date.now(); await put('projects', S.project); }
@@ -105,11 +105,36 @@ function stamp(t) { const d = new Date(t); return dateKey(t) + '-' + pad(d.getHo
 function fmtTime(t) { return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function defectsFor(component) { return S.project.defects.filter(d => d.component === component); }
-function defectById(id) { return S.project.defects.find(d => d.id === id); }
+/* ---------- Items: one form per window / door (1.10.0) ----------
+   A "Multiple" component (Window, Entry Door…) has numbered items at each unit: Window 1, Window 2…
+   Each item's results use the condition id plus the item number: "<conditionId>~3". Items are matched
+   across inspectors by unit and number, so everyone numbering in the same order lines up. */
+// ITEM_SEP and splitCid() are in sheets.js (shared with the Combine page)
+const itemCid = (base, n) => n ? base + ITEM_SEP + n : base;
+const isMulti = c => !!S.project && (S.project.multiComps || []).includes(c);
+const itemsKey = (unit, comp) => unit + '|' + comp;
+function itemsOf(unit, comp) { const p = S.project; return ((p.inst || {})[itemsKey(unit, comp)] || []); }
+function itemLabel(unit, comp, n) { const it = itemsOf(unit, comp).find(x => x.n === n); return it ? it.label : `${comp} ${n}`; }
+function curItem() { const p = S.project, st = p.state; if (!st.unit || !st.component || !isMulti(st.component)) return null; const n = (st.item || {})[itemsKey(st.unit, st.component)]; return itemsOf(st.unit, st.component).some(x => x.n === n) ? n : null; }
+function baseDefect(id) { return S.project.defects.find(d => d.id === id); }
+// A condition by id; for an item ("…~3") a copy of the condition carrying the item's id, number and name.
+function defectById(id) {
+  const { base, n } = splitCid(id); const d = baseDefect(n ? base : id);
+  if (!d || !n) return d;
+  return { ...d, id: itemCid(d.id, n), baseId: d.id, item: n };
+}
+// The conditions on screen: for a Multiple component, the current item's copies.
+function defectsHere(component) { const n = isMulti(component) ? curItem() : null; return defectsFor(component).map(d => n ? defectById(itemCid(d.id, n)) : d); }
+/* ---------- Typed answers (1.10.0) ---------- */
+const answerOf = d => (d && d.answer) || 'result';
+const isTyped = d => answerOf(d) !== 'result';
+const TYPED_RESULTS = ['NA', 'NR'];
+const recorded = o => !!(o && (o.value || (o.ans != null && String(o.ans).trim() !== '')));
+// parseMeasure() is in sheets.js (shared with the Combine page)
 // A condition, or (1.9.1) a component's General notes & photos entry, which photos can be linked to
 // without proving any one defect. Its id is generalId(component).
 function condById(id) {
-  if (isGeneral(id)) { const component = String(id).split('::')[1] || ''; return { id, component, label: 'General photo · ' + component, code: '', general: true }; }
+  if (isGeneral(id)) { const { base, n } = splitCid(id); const component = String(base).split('::')[1] || ''; return { id, component, label: 'General photo · ' + component + (n ? ' · ' + itemLabel(ctx().unit || '', component, n) : ''), code: '', general: true, item: n }; }
   return defectById(id);
 }
 // Folder names in the sorted export. Names that are already fine on Windows come out unchanged.
@@ -126,7 +151,13 @@ function folderName(s) {
 // A photo already exported and removed from the phone stays where it was exported (its file can't be exported again).
 function unitDir(p, proj) { const e = proj && proj.units.find(u => u.label === p.unit); return 'Photos/' + (e && e.kind === 'building' ? BLDG_DIR + '/' : '') + folderName(p.unit) + '/'; }
 function componentPath(p, proj = S.project) { return unitDir(p, proj) + folderName(p.component) + '/' + p.name; }   // before 1.9.2, every photo went here
-function pathNow(p, proj = S.project) { return (p.defectIds && p.defectIds.length) ? componentPath(p, proj) : unitDir(p, proj) + p.name; }
+// An item's photos (1.10.0) go one level deeper: Photos/<unit>/<component>/<Window 3>/
+function itemDir(p, proj) {
+  const n = p.defectIds && p.defectIds.length ? splitCid(p.defectIds[0]).n : null; if (!n || !proj) return '';
+  const it = ((proj.inst || {})[p.unit + '|' + p.component] || []).find(x => x.n === n);
+  return folderName(it ? it.label : `${p.component} ${n}`) + '/';
+}
+function pathNow(p, proj = S.project) { return (p.defectIds && p.defectIds.length) ? unitDir(p, proj) + folderName(p.component) + '/' + itemDir(p, proj) + p.name : unitDir(p, proj) + p.name; }
 function photoPath(p, proj = S.project) { return p.removed ? (p.expPath || componentPath(p, proj)) : pathNow(p, proj); }
 // When a photo's folder changes (linked, unlinked, moved), its sorted copy has to be exported again.
 function syncExport(p) { if (!p.removed && p.exp && p.exp.r && p.expPath && p.expPath !== pathNow(p)) p.exp.r = null; }
@@ -275,7 +306,9 @@ function parseWorkbook(wb, fileName) {
   const order = s => /defect|condition/i.test(s.name) ? 0 : 1;
   for (const s of [...sheets].sort((a, b) => order(a) - order(b))) {
     if (isBldgSheet(s)) continue;
-    const h = findHeader(s.rows, { comp: /^(component|category|system|area)s?$/, def: /^(defect|defects|condition|conditions|defect description|description|item)$/, optCode: /^(code|id|ref|no\.?|#|defect code|defect no\.?)$/, optAt: /^(recorded at|record at|recorded by|applies to|level)$/ });
+    const h = findHeader(s.rows, { comp: /^(component|category|system|area)s?$/, def: /^(defect|defects|condition|conditions|defect description|description|item)$/, optCode: /^(code|id|ref|no\.?|#|defect code|defect no\.?)$/, optAt: /^(recorded at|record at|recorded by|applies to|level)$/,
+      // 1.10.0: typed answers and repeatable components
+      optAns: /^(answer|answer type|answer as|input|input type|record as)$/, optChoices: /^(choices|choice list|options|list)$/, optUnits: /^(units|unit of measure|measure units|uom)$/, optMulti: /^(multiple|multiple items|repeat|repeatable|one per item|per item)$/ });
     if (!h) continue;
     let last = '';
     for (const r of s.rows.slice(h.row + 1)) {
@@ -283,7 +316,8 @@ function parseWorkbook(wb, fileName) {
       const d = String(r[h.cols.def] ?? '').trim();
       if (!d || !c) continue;
       last = c;
-      defects.push({ component: c, label: d, code: h.cols.optCode != null ? String(r[h.cols.optCode] ?? '').trim() : '', at: h.cols.optAt != null ? norm(r[h.cols.optAt]) : '' });
+      const cell = k => h.cols[k] != null ? String(r[h.cols[k]] ?? '').trim() : '';
+      defects.push({ component: c, label: d, code: cell('optCode'), at: norm(cell('optAt')), ...answerSpec(cell('optAns'), cell('optChoices'), cell('optUnits')), multi: /^(y|yes|true|x|1|multiple)$/i.test(cell('optMulti')) });
     }
     if (defects.length) break;
   }
@@ -379,8 +413,28 @@ function parseWorkbook(wb, fileName) {
     bldgComps = marked.length ? marked : components.filter(c => /^roof/i.test(c));
   }
   defects.forEach(d => delete d.at);
+  // components with "Multiple: Yes" on any of their rows: one form per item (each window, each door)
+  const multiComps = components.filter(c => defects.some(d => d.component === c && d.multi));
+  defects.forEach(d => delete d.multi);
   if (!number) { const m = String(fileName || '').match(/^([A-Za-z0-9][A-Za-z0-9.\-]{1,20})[ _]/); if (m) number = m[1]; }
-  return { number, name, units, components, defects, roofBy, roofSetting, buildings: roofBy === 'building' ? buildings : [], ignoredBuildings: roofBy === 'building' ? 0 : buildings.length, bldgComps };
+  return { number, name, units, components, defects, roofBy, roofSetting, buildings: roofBy === 'building' ? buildings : [], ignoredBuildings: roofBy === 'building' ? 0 : buildings.length, bldgComps, multiComps };
+}
+// Answer type from the Defects sheet (1.10.0): Result (1/0/NA/NR, the default), Number, Text or Choice.
+// A Choice list may end with "Other", which lets the inspector type an answer that isn't on the list.
+function answerSpec(ans, choices, units) {
+  const a = norm(ans);
+  const type = /^(num|number|numeric|measure|measurement|count|value)/.test(a) ? 'number' : /^(text|note|free text|type in|written)/.test(a) ? 'text'
+    : /^(choice|choose|list|pick|select|option)/.test(a) || (!a && choices) ? 'choice' : 'result';
+  if (type === 'result') return {};
+  const out = { answer: type };
+  if (type === 'choice') {
+    let list = String(choices || '').split(/[,;\n|]/).map(x => x.trim()).filter(Boolean);
+    if (list.some(x => /^other\b/i.test(x))) { out.other = true; list = list.filter(x => !/^other\b/i.test(x)); }
+    if (!list.length) return { answer: 'text' };
+    out.choices = list;
+  }
+  if (type === 'number' && units) out.units = String(units).trim();
+  return out;
 }
 
 async function importProjectFile(file) {
@@ -426,9 +480,9 @@ async function mergeLists(old, parsed) {
   if (old) {
     const obs = await byProject('obs', old.id);
     const photos = await byProject('photos', old.id);
-    const live = obs.filter(o => o.value || o.notes || (o.photoIds || []).length);
+    const live = obs.filter(o => o.value || o.notes || (o.ans != null && String(o.ans).trim()) || (o.photoIds || []).length);
     const usedUnits = new Set([...live.map(o => o.unit), ...photos.map(p => p.unit)]);
-    const usedDefs = new Set([...live.map(o => o.defectId), ...photos.flatMap(p => p.defectIds || [])]);
+    const usedDefs = new Set([...live.map(o => splitCid(o.defectId).base), ...photos.flatMap(p => (p.defectIds || []).map(x => splitCid(x).base))]);   // an item's results count for its condition
     const lc = v => String(v || '').trim().toLowerCase();
     const taken = new Set(), match = new Map();
     const pass = test => { for (const od of old.defects) { if (match.has(od)) continue; const nd = defects.find(x => !taken.has(x) && test(od, x)); if (nd) { taken.add(nd); match.set(od, nd); } } };
@@ -499,7 +553,9 @@ function confirmImport(parsed) {
         const keepB = m.units.some(isBldg);
         const bldgComps = byB ? [...new Set([...parsed.bldgComps, ...oldB.filter(c => m.addedComps.includes(c))])].filter(c => m.components.includes(c))
           : keepB ? oldB.filter(c => m.components.includes(c)) : [];
-        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps, orphanComps: m.orphanComps, roofBy: parsed.roofBy, bldgComps });
+        Object.assign(p, { number, name: $('#pname', el).value.trim(), units: m.units, components: m.components, defects: m.defects, addedComps: m.addedComps, orphanComps: m.orphanComps, roofBy: parsed.roofBy, bldgComps,
+          multiComps: [...new Set([...(parsed.multiComps || []), ...((target && target.multiComps) || []).filter(c => m.addedComps.includes(c))])].filter(c => m.components.includes(c)),
+          inst: (target && target.inst) || p.inst || {} });
         await put('projects', { ...p, updatedAt: Date.now() });
         S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         await activate(S.projects.find(x => x.id === p.id));
@@ -812,6 +868,7 @@ function requireContext() {
   if (!S.project) { toast('Import a project first'); return false; }
   if (!S.project.state.unit) { pickUnit(curView()); return false; }
   if (!S.project.state.component) { pickComponent(); return false; }
+  if (isMulti(S.project.state.component) && !curItem()) { toast(`Add a ${S.project.state.component.toLowerCase()} first`); return false; }
   return true;
 }
 
@@ -1388,7 +1445,8 @@ function unlockFocus() {
 /* ---------- controls ---------- */
 function camCtxHTML() {
   const { unit, component } = ctx(); const d = batch && batch.defectId ? condById(batch.defectId) : null;
-  return `<b>${esc(unit)}</b> · ${esc(component)}${d ? `<br><span>${esc(d.label)}</span>` : ''}`;
+  const it = curItem();
+  return `<b>${esc(unit)}</b> · ${esc(component)}${it ? ' · ' + esc(itemLabel(unit, component, it)) : ''}${d ? `<br><span>${esc(d.label)}</span>` : ''}`;
 }
 function camUpdate() {
   if (!CAM.el) return;
@@ -1613,11 +1671,17 @@ function confirmSheet(title, msg, okLabel, danger) {
 /* ================= Pickers ================= */
 function unitProgress(unit, component) {
   const ds = defectsFor(component);
-  let n = 0; for (const d of ds) { const o = getObs(unit, d.id); if (o && o.value) n++; }
+  const items = isMulti(component) ? itemsOf(unit, component).map(x => x.n) : [null];
+  let n = 0; for (const it of items) for (const d of ds) { if (recorded(getObs(unit, itemCid(d.id, it)))) n++; }
+  return { n, total: ds.length * items.length, items: isMulti(component) ? items.length : null };
+}
+function itemProgress(unit, component, it) {
+  const ds = defectsFor(component); let n = 0;
+  for (const d of ds) if (recorded(getObs(unit, itemCid(d.id, it)))) n++;
   return { n, total: ds.length };
 }
 function unitAnyData(label) {
-  for (const o of S.obs.values()) if (o.unit === label && (o.value || o.notes)) return true;
+  for (const o of S.obs.values()) if (o.unit === label && (recorded(o) || o.notes)) return true;
   return S.photos.some(ph => ph.unit === label);
 }
 function pickUnit(kind) {
@@ -1667,12 +1731,14 @@ function pickComponent() {
     title: 'Which component?',
     body: `<ul class="list">${compsOfKind(curView()).map(c => {
       const pr = unit ? unitProgress(unit, c) : null; const done = pr && pr.total && pr.n === pr.total;
-      return `<li><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}${isAddedComp(c) ? '<span class="sub">Added on site</span>' : isOrphanComp(c) ? '<span class="sub">No longer in the import file</span>' : ''}</span>
-        ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : ''}</button></li>`;
+      const sub = [isMulti(c) && pr ? `${pr.items} ${c.toLowerCase()}${pr.items === 1 ? '' : 's'}` : isMulti(c) ? 'One form per item' : '', isAddedComp(c) ? 'Added on site' : isOrphanComp(c) ? 'No longer in the import file' : ''].filter(Boolean).join(' · ');
+      return `<li><div class="item-row"><button data-comp="${esc(c)}" aria-current="${c === p.state.component}"><span>${esc(c)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span>
+        ${pr ? `<span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span>` : ''}</button>${isAddedComp(c) ? `<button class="mini" data-edit-comp="${esc(c)}">Edit</button>` : ''}</div></li>`;
     }).join('')}</ul>`,
     foot: `<button class="btn ghost" id="add-comp">+ Add component</button>`,
     mount(el, close) {
       el.querySelector('.list').onclick = async e => {
+        const ec = e.target.closest('[data-edit-comp]'); if (ec) { close(); editComponentSheet(ec.dataset.editComp); return; }
         const b = e.target.closest('[data-comp]'); if (!b) return;
         p.state.component = b.dataset.comp; await saveProject(); close(); render();
         if (!p.state.unit) pickUnit();
@@ -1718,6 +1784,7 @@ function addComponentSheet() {
   openSheet({
     title: 'Add a component',
     body: `<div class="field"><label for="nc-l">Component</label><input id="nc-l" autocomplete="off" placeholder="e.g. Decks"></div>
+      <label class="check"><input type="checkbox" id="nc-m"> One form per item (like windows or doors: + Add at each ${isBldgLabel(p.state.unit) ? 'building' : 'unit'})</label>
       <p class="note">${isBldgLabel(p.state.unit) ? 'It’s added for buildings only. ' : bldgMode() ? 'It’s added for units only. ' : ''}After adding it, add its defect conditions from the bottom of the list.</p>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nc-go">Add component</button>`,
     mount(el, close) {
@@ -1727,6 +1794,7 @@ function addComponentSheet() {
         if (!c) { inp.focus(); toast('Enter a component'); return; }
         if (p.components.some(x => x.toLowerCase() === c.toLowerCase())) { toast(`${c} is already in the list`); return; }
         p.components.push(c); p.addedComps.push(c); p.state.component = c;
+        if ($('#nc-m', el).checked) p.multiComps = [...(p.multiComps || []), c];
         if (isBldgLabel(p.state.unit)) p.bldgComps = [...(p.bldgComps || []), c];   // added at a building: a building component
         await saveProject(); close(); render(); toast(`${c} added`);
         if (!p.state.unit) pickUnit(); else addDefectSheet();
@@ -1741,18 +1809,23 @@ function addDefectSheet() {
     body: `<p class="note">Component: <b>${esc(comp)}</b></p>
       <div class="field"><label for="nd-l">Defect condition</label><input id="nd-l" autocomplete="off" placeholder="e.g. Sealant missing at penetration"></div>
       <div class="field"><label for="nd-c">Code (optional)</label><input id="nd-c" autocomplete="off" autocapitalize="characters" placeholder="e.g. ST-9"></div>
+      <div class="field"><label>Answer</label><div class="seg" role="radiogroup">${[['result', '1 / 0 / NA / NR'], ['number', 'Number'], ['text', 'Text']].map(([v, l], i) => `<button role="radio" data-nd-a="${v}" aria-checked="${!i}">${l}</button>`).join('')}</div></div>
+      <div class="field" id="nd-u-f" hidden><label for="nd-u">Units (optional)</label><input id="nd-u" autocomplete="off" placeholder="e.g. in."></div>
       <p class="note">It’s added for every ${isBldgComp(comp) ? 'building' : 'unit'}. Conditions you add can be deleted later; ones from the import file are protected.</p>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="nd-go">Add condition</button>`,
     mount(el, close) {
       const inp = $('#nd-l', el); inp.focus();
+      let ansT = 'result';
+      el.querySelectorAll('[data-nd-a]').forEach(b => b.onclick = () => { ansT = b.dataset.ndA; el.querySelectorAll('[data-nd-a]').forEach(x => x.setAttribute('aria-checked', x === b)); $('#nd-u-f', el).hidden = ansT !== 'number'; });
       $('#nd-go', el).onclick = async () => {
         const label = inp.value.trim(), code = $('#nd-c', el).value.trim();
+        const extra = ansT === 'result' ? {} : { answer: ansT, ...(ansT === 'number' && $('#nd-u', el).value.trim() ? { units: $('#nd-u', el).value.trim() } : {}) };
         if (!label) { inp.focus(); toast('Enter the condition'); return; }
         const id = slug(comp) + '__' + slug(code ? code + ' ' + label : label);
         if (p.defects.some(d => d.id === id || (d.component === comp && d.label.toLowerCase() === label.toLowerCase()))) { toast('That condition is already in the list'); return; }
         // keep the component's conditions together: insert after its last condition
         let at = -1; p.defects.forEach((d, i) => { if (d.component === comp) at = i; });
-        p.defects.splice(at < 0 ? p.defects.length : at + 1, 0, { component: comp, label, code, id, added: true });
+        p.defects.splice(at < 0 ? p.defects.length : at + 1, 0, { component: comp, label, code, id, added: true, ...extra });
         await saveProject(); close(); render(); toast('Condition added');
         const sec = document.querySelector(`.defect[data-d="${id}"]`); sec && sec.scrollIntoView({ block: 'center' });
       };
@@ -1765,13 +1838,13 @@ function editListsSheet() {
   const draw = el => {
     const au = p.units.filter(u => !isBldg(u) && (u.added || u.orphan)), ab = p.units.filter(u => isBldg(u) && (u.added || u.orphan)), ac = p.components.filter(c => isAddedComp(c) || isOrphanComp(c)), ad = p.defects.filter(d => d.added || d.orphan);
     const why = x => x === true ? 'No longer in the import file' : '';
-    const row = (label, sub, attr) => `<div class="link-row"><span>${esc(label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span><span class="acts"><button class="mini" ${attr}>Delete</button></span></div>`;
+    const row = (label, sub, attr, editAttr) => `<div class="link-row"><span>${esc(label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span><span class="acts">${editAttr ? `<button class="mini" ${editAttr}>Edit</button>` : ''}<button class="mini red" ${attr}>Delete</button></span></div>`;
     $('.sheet-body', el).innerHTML = `
       <p class="note">🔒 ${lockedU} units, ${hasBldgs() ? lockedB + ' buildings, ' : ''}${lockedC} components and ${lockedD} conditions come from the import file and can’t be deleted here. Below are items added on site, and items that are no longer in the import file but were kept because they had data.</p>
       <div class="section-h">Units</div>${au.length ? au.map(u => row(u.label, [u.desc, u.orphan ? 'No longer in the import file' : 'Added on site'].filter(Boolean).join(' · '), `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}
       ${hasBldgs() ? `<div class="section-h">Buildings</div>${ab.length ? ab.map(u => row(u.label, [u.desc, u.orphan ? 'No longer in the import file' : 'Added on site'].filter(Boolean).join(' · '), `data-du="${esc(u.label)}"`)).join('') : '<p class="note">None</p>'}` : ''}
-      <div class="section-h">Components</div>${ac.length ? ac.map(c => row(c, isOrphanComp(c) ? 'No longer in the import file' : 'Added on site', `data-dc="${esc(c)}"`)).join('') : '<p class="note">None</p>'}
-      <div class="section-h">Conditions</div>${ad.length ? ad.map(d => row((d.code ? d.code + ' ' : '') + d.label, d.component + ' · ' + (d.orphan ? 'No longer in the import file' : 'Added on site'), `data-dd="${d.id}"`)).join('') : '<p class="note">None</p>'}`;
+      <div class="section-h">Components</div>${ac.length ? ac.map(c => row(c, isOrphanComp(c) ? 'No longer in the import file' : 'Added on site', `data-dc="${esc(c)}"`, isAddedComp(c) ? `data-ec="${esc(c)}"` : '')).join('') : '<p class="note">None</p>'}
+      <div class="section-h">Conditions</div>${ad.length ? ad.map(d => row((d.code ? d.code + ' ' : '') + d.label, d.component + ' · ' + (d.orphan ? 'No longer in the import file' : 'Added on site'), `data-dd="${d.id}"`, d.added ? `data-ed="${d.id}"` : '')).join('') : '<p class="note">None</p>'}`;
   };
   openSheet({
     title: 'Edit lists', body: '',
@@ -1782,7 +1855,7 @@ function editListsSheet() {
       const eb = $('#el-b', el); if (eb) eb.onclick = () => { close(); addUnitSheet('', 'building'); };
       $('#el-c', el).onclick = () => { close(); addComponentSheet(); };
       el.querySelector('.sheet-body').addEventListener('click', async e => {
-        const b = e.target.closest('[data-du],[data-dc],[data-dd]'); if (!b) return;
+        const b = e.target.closest('[data-du],[data-dc],[data-dd],[data-ec],[data-ed]'); if (!b) return;
         if (b.dataset.du != null) {
           const label = b.dataset.du, W = kindWord(label), w = W.toLowerCase();
           if (S.photos.some(ph => ph.unit === label)) { alertSheet(`Can’t delete this ${w} yet`, `${W} ${label} has photos. Delete or keep its photos first — deleting the ${w} would leave them without a folder.`); return; }
@@ -1791,27 +1864,116 @@ function editListsSheet() {
           await deleteObsWhere(o => o.unit === label);
           p.units = p.units.filter(u => u.label !== label); if (p.state.unit === label) p.state.unit = null;
         }
-        if (b.dataset.dc != null) {
-          const c = b.dataset.dc;
-          if (p.defects.some(d => d.component === c && !d.added && !d.orphan)) { toast('This component has protected conditions'); return; }
-          if (S.photos.some(ph => ph.component === c)) { alertSheet('Can’t delete this component yet', `${c} has photos. Delete or keep its photos first.`); return; }
-          if (!await confirmSheet(`Delete ${c}?`, 'Its added conditions and any results for them will be deleted too.', 'Delete', true)) return;
-          const ids = new Set(p.defects.filter(d => d.component === c).map(d => d.id));
-          await deleteObsWhere(o => ids.has(o.defectId) || o.defectId === generalId(c));
-          p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c); p.orphanComps = (p.orphanComps || []).filter(x => x !== c); p.bldgComps = (p.bldgComps || []).filter(x => x !== c);
-          if (p.state.component === c) p.state.component = null;
-        }
-        if (b.dataset.dd != null) {
-          const d = defectById(b.dataset.dd);
-          if (S.photos.some(ph => ph.defectIds.includes(d.id))) { alertSheet('Can’t delete this condition yet', 'Photos are linked to it. Unlink them first (tap a photo → Unlink) so they aren’t lost from the spreadsheet.'); return; }
-          if (!await confirmSheet('Delete condition?', `“${d.label}” and any results recorded for it will be deleted.`, 'Delete', true)) return;
-          await deleteObsWhere(o => o.defectId === d.id);
-          p.defects = p.defects.filter(x => x.id !== d.id);
-        }
+        if (b.dataset.dc != null) { if (!await deleteComponent(b.dataset.dc)) return; }
+        if (b.dataset.dd != null) { if (!await deleteDefect(b.dataset.dd)) return; }
+        if (b.dataset.ec != null) { close(); editComponentSheet(b.dataset.ec); return; }
+        if (b.dataset.ed != null) { close(); editDefectSheet(b.dataset.ed); return; }
         await saveProject(); draw(el); render();
       });
     }
   });
+}
+/* ---------- Editing and deleting what was added on site (1.10.0) ----------
+   Deleting asks first and says what will be lost. Photos are never deleted: they go back to Unlinked. */
+const cidsOf = base => o => splitCid(o).base === base;
+async function deleteDefect(baseId) {
+  const p = S.project, d = baseDefect(baseId); if (!d) return false;
+  if (!d.added && !d.orphan) { toast('Conditions from the import file can’t be deleted'); return false; }
+  const mine = id => splitCid(id).base === baseId;
+  const obs = [...S.obs.values()].filter(o => mine(o.defectId)), photos = S.photos.filter(ph => ph.defectIds.some(mine));
+  const nR = obs.filter(recorded).length, nN = obs.filter(o => o.notes && o.notes.trim()).length;
+  const lost = [nR && `${nR} result${nR > 1 ? 's' : ''}`, nN && `${nN} note${nN > 1 ? 's' : ''}`].filter(Boolean).join(' and ');
+  if (!await confirmSheet(`Delete “${d.label}”?`, `${lost ? `Its ${lost} will be deleted, at every ${isBldgComp(d.component) ? 'building' : 'unit'}.` : 'Nothing has been recorded for it yet.'}${photos.length ? `\n\n${photos.length} linked photo${photos.length > 1 ? 's go' : ' goes'} back to Unlinked. Photos are never deleted.` : ''}`, 'Delete', true)) return false;
+  await flushNotes();
+  for (const ph of photos) for (const id of [...ph.defectIds]) if (mine(id)) await unlinkPhoto(ph, id);
+  await deleteObsWhere(o => mine(o.defectId));
+  p.defects = p.defects.filter(x => x.id !== baseId);
+  await saveProject(); toast('Condition deleted'); return true;
+}
+async function deleteComponent(c) {
+  const p = S.project;
+  if (p.defects.some(d => d.component === c && !d.added && !d.orphan)) { toast('This component has conditions from the import file'); return false; }
+  const ids = new Set(p.defects.filter(d => d.component === c).map(d => d.id)), gen = generalId(c);
+  const mine = id => { const b = splitCid(id).base; return ids.has(b) || b === gen; };
+  const obs = [...S.obs.values()].filter(o => mine(o.defectId)), linked = S.photos.filter(ph => ph.defectIds.some(mine));
+  const nR = obs.filter(recorded).length, nN = obs.filter(o => o.notes && o.notes.trim()).length, nItems = Object.keys(p.inst || {}).filter(k => k.endsWith('|' + c)).reduce((s, k) => s + p.inst[k].length, 0);
+  const lost = [ids.size && `its ${ids.size} condition${ids.size > 1 ? 's' : ''}`, nItems && `${nItems} item${nItems > 1 ? 's' : ''}`, nR && `${nR} result${nR > 1 ? 's' : ''}`, nN && `${nN} note${nN > 1 ? 's' : ''}`].filter(Boolean).join(', ');
+  if (!await confirmSheet(`Delete ${c}?`, `${lost ? `This deletes ${lost}.` : 'It has nothing recorded yet.'}${linked.length ? `\n\n${linked.length} linked photo${linked.length > 1 ? 's go' : ' goes'} back to Unlinked. Photos are never deleted.` : ''}`, 'Delete', true)) return false;
+  await flushNotes();
+  for (const ph of linked) for (const id of [...ph.defectIds]) if (mine(id)) await unlinkPhoto(ph, id);
+  await deleteObsWhere(o => mine(o.defectId));
+  p.defects = p.defects.filter(d => d.component !== c); p.components = p.components.filter(x => x !== c); p.addedComps = p.addedComps.filter(x => x !== c);
+  p.orphanComps = (p.orphanComps || []).filter(x => x !== c); p.bldgComps = (p.bldgComps || []).filter(x => x !== c); p.multiComps = (p.multiComps || []).filter(x => x !== c);
+  for (const k of Object.keys(p.inst || {})) if (k.endsWith('|' + c)) delete p.inst[k];
+  if (p.state.component === c) p.state.component = null;
+  await saveProject(); toast(`${c} deleted`); return true;
+}
+function editDefectSheet(baseId) {
+  const p = S.project, d = baseDefect(baseId); if (!d || !d.added) return;
+  openSheet({
+    title: 'Edit condition',
+    body: `<p class="note">Component: <b>${esc(d.component)}</b> · added on site</p>
+      <div class="field"><label for="ed-l">Defect condition</label><input id="ed-l" value="${esc(d.label)}" autocomplete="off"></div>
+      <div class="field"><label for="ed-c">Code (optional)</label><input id="ed-c" value="${esc(d.code || '')}" autocomplete="off" autocapitalize="characters"></div>
+      <p class="note">Results, notes and photos stay with it.</p>`,
+    foot: `<button class="btn ghost red-text" id="ed-del">Delete…</button><button class="btn ghost" data-close>Cancel</button><button class="btn" id="ed-go">Save</button>`,
+    mount(el, close) {
+      $('#ed-go', el).onclick = async () => {
+        const label = $('#ed-l', el).value.trim(), code = $('#ed-c', el).value.trim();
+        if (!label) { toast('Enter the condition'); return; }
+        if (p.defects.some(x => x !== d && x.component === d.component && x.label.toLowerCase() === label.toLowerCase())) { toast('That condition is already in the list'); return; }
+        d.label = label; d.code = code; await saveProject(); close(); render(); toast('Condition updated');
+      };
+      $('#ed-del', el).onclick = async () => { if (await deleteDefect(baseId)) { close(); render(); } };
+    }
+  });
+}
+function editComponentSheet(c) {
+  const p = S.project; if (!isAddedComp(c)) return;
+  openSheet({
+    title: 'Edit component',
+    body: `<div class="field"><label for="ec-l">Component</label><input id="ec-l" value="${esc(c)}" autocomplete="off"></div>
+      <p class="note">Added on site. Renaming keeps its conditions, results, notes and photos; its photo folder is renamed, so those photos are exported again.</p>`,
+    foot: `<button class="btn ghost red-text" id="ec-del">Delete…</button><button class="btn ghost" data-close>Cancel</button><button class="btn" id="ec-go">Save</button>`,
+    mount(el, close) {
+      $('#ec-go', el).onclick = async () => {
+        const nc = $('#ec-l', el).value.trim();
+        if (!nc) { toast('Enter a name'); return; }
+        if (nc !== c && p.components.some(x => x.toLowerCase() === nc.toLowerCase())) { toast(`${nc} is already in the list`); return; }
+        if (nc !== c) await renameComponent(c, nc);
+        close(); render(); toast('Component updated');
+      };
+      $('#ec-del', el).onclick = async () => { if (await deleteComponent(c)) { close(); render(); } };
+    }
+  });
+}
+async function renameComponent(c, nc) {
+  const p = S.project, st = p.state; await flushNotes();
+  const sw = a => (a || []).map(x => x === c ? nc : x);
+  p.components = sw(p.components); p.addedComps = sw(p.addedComps); p.bldgComps = sw(p.bldgComps); p.multiComps = sw(p.multiComps); p.orphanComps = sw(p.orphanComps);
+  p.defects.forEach(d => { if (d.component === c) d.component = nc; });
+  const og = generalId(c), ng = generalId(nc);
+  const mapId = id => { const { base, n } = splitCid(id); return base === og ? itemCid(ng, n) : id; };
+  const dbh = await db(); const t = dbh.transaction(['obs', 'photos'], 'readwrite');
+  for (const o of [...S.obs.values()]) {
+    if (o.component !== c && splitCid(o.defectId).base !== og) continue;
+    const nid = mapId(o.defectId);
+    if (nid !== o.defectId) { t.objectStore('obs').delete(o.key); S.obs.delete(o.key); o.defectId = nid; o.key = obsKey(o.unit, nid); S.obs.set(o.key, o); }
+    o.component = nc; t.objectStore('obs').put(o);
+  }
+  for (const ph of S.photos) {
+    let ch = false;
+    if (ph.component === c) { ph.component = nc; ch = true; }
+    if (ph.takenDuring === c) { ph.takenDuring = nc; ch = true; }
+    const ids = ph.defectIds.map(mapId); if (ids.some((x, i) => x !== ph.defectIds[i])) { ph.defectIds = ids; ch = true; }
+    if (ch) { syncExport(ph); t.objectStore('photos').put(ph); }
+  }
+  await txDone(t);
+  for (const k of Object.keys(p.inst || {})) if (k.endsWith('|' + c)) { const nk = k.slice(0, -c.length) + nc; p.inst[nk] = p.inst[k].map(it => ({ ...it, label: it.label === `${c} ${it.n}` ? `${nc} ${it.n}` : it.label })); delete p.inst[k]; }
+  if (st.item) for (const k of Object.keys(st.item)) if (k.endsWith('|' + c)) { st.item[k.slice(0, -c.length) + nc] = st.item[k]; delete st.item[k]; }
+  if (st.lastComp) for (const k in st.lastComp) if (st.lastComp[k] === c) st.lastComp[k] = nc;
+  if (st.component === c) st.component = nc;
+  await saveProject();
 }
 async function deleteObsWhere(fn) {
   const dead = [...S.obs.values()].filter(fn);
@@ -1830,14 +1992,15 @@ async function stepUnit(dir) {
 /* ================= Link sheet (photo-first) ================= */
 function linkSheet(photos, fresh) {
   const { component } = ctx();
-  const ds = defectsFor(component);
+  const ds = defectsHere(component);
   const unit = photos[0].unit;
+  const gidHere = itemCid(generalId(component), curItem());
   const n = photos.length;
   openSheet({
     title: fresh ? (n > 1 ? `${n} photos saved — link them?` : 'Photo saved — link it?') : `Link ${n} photo${n > 1 ? 's' : ''}`,
     body: `<div class="preview-strip">${photos.map(p => thumbHTML(p)).join('')}</div>
       <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this ${kindWord(unit).toLowerCase()}’s folder.</p>
-      <div><div class="link-row general-row top"><span><b>General photo</b> · ${esc(component)}<span class="sub">For this ${kindWord(unit).toLowerCase()} and component, not one particular condition</span></span><span class="acts"><button class="mini" data-link="${generalId(component)}">Link</button></span></div>
+      <div><div class="link-row general-row top"><span><b>General photo</b> · ${esc(component)}<span class="sub">For this ${kindWord(unit).toLowerCase()} and component, not one particular condition</span></span><span class="acts"><button class="mini" data-link="${esc(gidHere)}">Link</button></span></div>
       ${ds.map(d => {
         const o = getObs(unit, d.id);
         return `<div class="link-row"><span>${d.code ? `<b>${esc(d.code)}</b> ` : ''}${esc(d.label)} ${o && o.value ? `<span class="vchip" data-v="${o.value}">${o.value}</span>` : ''}</span>
@@ -1964,7 +2127,7 @@ function missingList() {
   const dIdx = new Map(S.project.defects.map((d, i) => [d.id, i]));
   return [...S.obs.values()]
     .filter(o => o.value === '1' && !(o.photoIds || []).length && !isGeneral(o.defectId) && defectById(o.defectId))
-    .sort((a, b) => (rank.get(a.unit) ?? 1e9) - (rank.get(b.unit) ?? 1e9) || dIdx.get(a.defectId) - dIdx.get(b.defectId))
+    .sort((a, b) => (rank.get(a.unit) ?? 1e9) - (rank.get(b.unit) ?? 1e9) || (dIdx.get(splitCid(a.defectId).base) ?? 0) - (dIdx.get(splitCid(b.defectId).base) ?? 0) || (splitCid(a.defectId).n || 0) - (splitCid(b.defectId).n || 0))
     .map(o => ({ key: o.key, unit: o.unit, d: defectById(o.defectId) }));
 }
 function missingSheet() {
@@ -1972,7 +2135,7 @@ function missingSheet() {
   openSheet({
     title: 'Defective, no photo',
     body: list.length ? `<p class="note">${list.length} condition${list.length > 1 ? 's are' : ' is'} marked 1 with no photo linked. Tap one to go to it.</p>
-      <ul class="list">${list.map((m, i) => `<li><button data-mi="${i}"><span><b>${kindWord(m.unit)} ${esc(m.unit)}</b><span class="sub">${esc(m.d.component)} · ${m.d.code ? esc(m.d.code) + ' ' : ''}${esc(m.d.label)}</span></span><span class="meta">›</span></button></li>`).join('')}</ul>`
+      <ul class="list">${list.map((m, i) => `<li><button data-mi="${i}"><span><b>${kindWord(m.unit)} ${esc(m.unit)}</b><span class="sub">${esc(m.d.component)}${m.d.item ? ' · ' + esc(itemLabel(m.unit, m.d.component, m.d.item)) : ''} · ${m.d.code ? esc(m.d.code) + ' ' : ''}${esc(m.d.label)}</span></span><span class="meta">›</span></button></li>`).join('')}</ul>`
       : '<p>Every defective condition has a photo linked.</p>',
     foot: '<button class="btn" data-close>Close</button>',
     mount(el, close) { el.addEventListener('click', e => { const b = e.target.closest('[data-mi]'); if (b) { close(); goToMissing(list[+b.dataset.mi].key); } }); }
@@ -1986,7 +2149,7 @@ async function goToMissing(key) {
   if (!m) { hideMissNav(); toast('Every defective condition now has a photo'); return; }
   document.querySelectorAll('#sheet-root .scrim [data-close]').forEach(b => b.click());
   missKey = m.key; missIdx = i;
-  setEntry(m.unit); S.project.state.component = m.d.component; await saveProject(); render();
+  setEntry(m.unit); S.project.state.component = m.d.component; if (m.d.item) setItem(m.d.item); await saveProject(); render();
   showMissNav(i, list.length);
   requestAnimationFrame(() => {
     const sec = document.querySelector(`.defect[data-d="${CSS.escape(m.d.id)}"]`);
@@ -2121,7 +2284,10 @@ async function viewPhoto(id) {
   const p = photoById(id); if (!p) return;
   const blob = hasBlob(p) ? await get('blobs', id) : null; const url = blob ? URL.createObjectURL(blob) : '';
   const tsrc = url ? '' : await thumbSrc(id);
-  const comp = !p.defectIds.length && ctx().unit === p.unit && ctx().component ? ctx().component : p.component; const ds = defectsFor(comp);
+  const comp = !p.defectIds.length && ctx().unit === p.unit && ctx().component ? ctx().component : p.component;
+  const here = ctx().unit === p.unit && comp === ctx().component;
+  const ds = here ? defectsHere(comp) : isMulti(comp) ? [] : defectsFor(comp);   // an item's conditions are linked from that item
+  const vg = here ? itemCid(generalId(comp), curItem()) : isMulti(comp) ? null : generalId(comp);
   const draw = el => {
     $('.sheet-body', el).innerHTML = `${isVideo(p) && url ? `<video class="viewer-img" src="${url}" controls playsinline preload="metadata"></video>` : `<div class="viewer-wrap"><img class="viewer-img zoomable" src="${url || tsrc}" alt="" draggable="false"></div><p class="note viewer-hint">Pinch or double-tap the photo to zoom.</p>`}
       ${url ? '' : `<p class="note">The full-size file was exported and removed from this phone to free space${p.rcv ? ` (the PC confirmed it has it${p.rcv.made ? ', ' + esc(String(p.rcv.made).slice(0, 10)) : ''})` : ''}. This is the thumbnail.</p>`}
@@ -2132,7 +2298,7 @@ async function viewPhoto(id) {
       ${p.defectIds.length ? p.defectIds.map(d => { const df = condById(d); return `<div class="link-row"><span>${esc(df ? df.label : d)}</span><span class="acts"><button class="mini" data-unlink="${d}">Unlink</button></span></div>`; }).join('') : '<p class="note">Not linked to a condition yet.</p>'}
       <div class="section-h">Link to another condition</div>
       ${ds.filter(d => !p.defectIds.includes(d.id)).map(d => `<div class="link-row"><span>${esc(d.label)}</span><span class="acts"><button class="mini" data-link="${d.id}">Link</button><button class="mini red" data-link1="${d.id}">Link + 1</button></span></div>`).join('')}
-      ${comp && !p.defectIds.includes(generalId(comp)) ? `<div class="link-row general-row"><span><b>General photo</b> · ${esc(comp)}<span class="sub">Not one particular condition</span></span><span class="acts"><button class="mini" data-link="${generalId(comp)}">Link</button></span></div>` : ''}`;
+      ${comp && vg && !p.defectIds.includes(vg) ? `<div class="link-row general-row"><span><b>General photo</b> · ${esc(comp)}<span class="sub">Not one particular condition</span></span><span class="acts"><button class="mini" data-link="${esc(vg)}">Link</button></span></div>` : ''}`;
   };
   openSheet({
     title: 'Photo', body: '', foot: `<button class="btn danger" id="v-del">Delete photo</button>`,
@@ -2166,8 +2332,10 @@ async function viewPhoto(id) {
 /* ================= Results / notes ================= */
 async function setResult(defectId, v) {
   const { unit } = ctx();
+  await flushNotes();
   const o = await ensureObs(unit, defectId);
   o.value = o.value === v ? '' : v;
+  if (o.value && isTyped(defectById(defectId))) o.ans = '';   // NA / NR replaces a typed answer
   o.updatedAt = Date.now(); o.inspector = S.settings.initials;
   await put('obs', o);
   renderDefect(defectId);
@@ -2176,11 +2344,11 @@ async function setResult(defectId, v) {
 // Notes save shortly after typing stops. Each pending note remembers the project and unit it was typed at,
 // so moving to another unit (or project) straight after typing can never put it in the wrong place.
 const noteTimers = new Map();   // "projectId|unit|defectId" -> { pid, unit, defectId, text, t }
-function saveNote(defectId, text) {
+function saveNote(defectId, text, field = 'notes') {
   if (!S.project) return;
-  const pid = S.project.id, unit = ctx().unit, k = pid + '|' + unit + '|' + defectId;
+  const pid = S.project.id, unit = ctx().unit, k = pid + '|' + unit + '|' + defectId + '|' + field;
   const prev = noteTimers.get(k); if (prev) clearTimeout(prev.t);
-  const job = { pid, unit, defectId, text };
+  const job = { pid, unit, defectId, text, field };
   job.t = setTimeout(() => commitNote(k), 350);
   noteTimers.set(k, job);
 }
@@ -2190,14 +2358,16 @@ function commitNote(k) {
   const key = j.pid + '|' + j.unit + '|' + j.defectId;
   const blank = () => {
     const d = S.project && S.project.id === j.pid ? defectById(j.defectId) : null;
-    return { key, projectId: j.pid, unit: j.unit, defectId: j.defectId, component: d ? d.component : (isGeneral(j.defectId) ? j.defectId.split('::')[1] : ''), value: '', notes: '', photoIds: [], updatedAt: 0 };
+    return { key, projectId: j.pid, unit: j.unit, defectId: j.defectId, component: d ? d.component : (isGeneral(j.defectId) ? splitCid(j.defectId).base.split('::')[1] : ''), value: '', notes: '', photoIds: [], updatedAt: 0 };
   };
+  // a typed answer replaces NA / NR (and the other way round, in setResult)
+  const apply = o => { o[j.field] = j.text; if (j.field === 'ans' && String(j.text).trim()) o.value = ''; o.updatedAt = Date.now(); o.inspector = S.settings.initials; return o; };
   if (S.project && S.project.id === j.pid) {          // updated in memory straight away, so a re-draw shows it
     let o = S.obs.get(key); if (!o) { o = blank(); S.obs.set(key, o); }
-    o.notes = j.text; o.updatedAt = Date.now(); o.inspector = S.settings.initials;
+    apply(o);
     return put('obs', o);
   }
-  return get('obs', key).then(o => { o = o || blank(); o.notes = j.text; o.updatedAt = Date.now(); o.inspector = S.settings.initials; return put('obs', o); });
+  return get('obs', key).then(o => put('obs', apply(o || blank())));
 }
 function flushNotes() { return Promise.all([...noteTimers.keys()].map(commitNote)); }
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushNotes(); });
@@ -2249,7 +2419,7 @@ function render() {
 function renderProgress() {
   const el = $('#progress'); if (!el) return;
   const st = S.project.state;
-  if (st.unit && st.component) { const pr = unitProgress(st.unit, st.component); el.innerHTML = `<b>${pr.n}</b>/${pr.total} recorded`; } else el.textContent = '';
+  if (st.unit && st.component) { const it = curItem(); const pr = it ? itemProgress(st.unit, st.component, it) : unitProgress(st.unit, st.component); el.innerHTML = isMulti(st.component) && !it ? '' : `<b>${pr.n}</b>/${pr.total} recorded`; } else el.textContent = '';
   const tn = $('#tray-n'); if (tn) { const n = st.unit && st.component ? trayPhotos().length : 0; tn.textContent = n; tn.style.visibility = n ? 'visible' : 'hidden'; }
 }
 function defectHTML(d) {
@@ -2258,10 +2428,10 @@ function defectHTML(d) {
   const photos = o.photoIds.map(photoById).filter(Boolean);
   const open = S.openNotes.has(d.id) || !!o.notes;
   return `<section class="defect" data-d="${d.id}" data-v="${o.value}">
-    <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}${d.added ? ' <span class="added">Added on site</span>' : d.orphan ? ' <span class="added">No longer in the import file</span>' : ''}</h3>
-    <div class="results" role="group" aria-label="Result">
+    <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}${d.units ? ` <span class="added">${esc(d.units)}</span>` : ''}${d.added ? ' <button class="added edit-added" data-edit-def="' + esc(d.baseId || d.id) + '">Added on site · Edit</button>' : d.orphan ? ' <span class="added">No longer in the import file</span>' : ''}</h3>
+    ${isTyped(d) ? answerHTML(d, o) : `<div class="results" role="group" aria-label="Result">
       ${RESULTS.map(r => `<button class="res" data-r="${r}" aria-pressed="${o.value === r}">${r}</button>`).join('')}
-    </div>
+    </div>`}
     <div class="d-actions">
       <button class="chip${photos.length ? ' has' : ''}" data-act="photo">📷 Photo${photos.length ? ' · ' + photos.length : ''}</button>
       <button class="chip" data-act="attach">Link unlinked</button>
@@ -2271,6 +2441,33 @@ function defectHTML(d) {
     ${photos.length ? `<div class="thumbs">${photos.map(p => thumbHTML(p, { badge: '#' + p.seq })).join('')}</div>` : ''}
     ${open ? `<textarea class="notes" data-note="${d.id}" placeholder="Notes for this condition">${esc(o.notes)}</textarea>` : ''}
   </section>`;
+}
+// Number, Text and Choice answers (1.10.0). NA / NR stay available.
+function answerHTML(d, o) {
+  const a = answerOf(d), ans = o.ans != null ? String(o.ans) : '';
+  let box = '';
+  if (a === 'choice') {
+    const onList = d.choices.includes(ans), other = ans && !onList;
+    box = `<div class="choices" role="group" aria-label="Answer">${d.choices.map(c => `<button class="res ch" data-ch="${esc(c)}" aria-pressed="${ans === c}">${esc(c)}</button>`).join('')}
+      ${d.other ? `<button class="res ch" data-ch-other aria-pressed="${!!other}">Other</button>` : ''}</div>
+      ${d.other && (other || S.openNotes.has('other|' + d.id)) ? `<input class="ans-in" data-ans="${esc(d.id)}" value="${esc(other ? ans : '')}" placeholder="Type the ${esc(d.label.replace(/\?$/, '').toLowerCase())}" autocomplete="off">` : ''}`;
+  } else if (a === 'number') {
+    const v = parseMeasure(ans);
+    box = `<div class="ans-row"><input class="ans-in num" data-ans="${esc(d.id)}" value="${esc(ans)}" placeholder="${d.units ? 'e.g. 41 1/2 (' + esc(d.units) + ')' : 'Number'}" autocomplete="off" enterkeyhint="done">
+      <span class="ans-dec" data-dec="${esc(d.id)}">${ans ? (v == null ? '⚠ not a number' : '= ' + v + (d.units ? ' ' + esc(d.units) : '')) : ''}</span></div>`;
+  } else {
+    box = `<input class="ans-in" data-ans="${esc(d.id)}" value="${esc(ans)}" placeholder="Type the answer" autocomplete="off" enterkeyhint="done">`;
+  }
+  return `<div class="answer">${box}<div class="results na-nr" role="group" aria-label="Not applicable or not recorded">
+    ${TYPED_RESULTS.map(r => `<button class="res" data-r="${r}" aria-pressed="${o.value === r}">${r}</button>`).join('')}</div></div>`;
+}
+// The item bar above a Multiple component's list: Window 2 of 5, with ‹ › and + Add window.
+function itemBarHTML() {
+  const st = S.project.state, items = itemsOf(st.unit, st.component), n = curItem(), i = items.findIndex(x => x.n === n);
+  return `<div class="item-bar"><button class="step" id="it-prev" aria-label="Previous" ${i <= 0 ? 'disabled' : ''}>‹</button>
+    <button class="item-btn" id="it-pick"><span class="lbl">${items.length ? `${i + 1} of ${items.length} · tap to list` : esc(st.component)}</span><span class="val">${n ? esc(itemLabel(st.unit, st.component, n)) : 'None yet'}</span></button>
+    <button class="step" id="it-next" aria-label="Next" ${i < 0 || i >= items.length - 1 ? 'disabled' : ''}>›</button>
+    <button class="btn" id="it-add">+ Add</button></div>`;
 }
 function renderList() {
   const list = $('#list'); if (!list) return;
@@ -2282,21 +2479,29 @@ function renderList() {
     $('#pick').onclick = !st.unit ? () => pickUnit(curView()) : pickComponent;
     return;
   }
-  const ds = defectsFor(st.component);
-  const gid = generalId(st.component);
-  const g = getObs(st.unit, gid);
-  list.innerHTML = (ds.length ? '' : `<div class="empty"><h2>No conditions yet</h2>${esc(st.component)} has no defect conditions. Add the first one below.</div>`)
+  const multi = isMulti(st.component);
+  if (multi && !curItem()) {
+    const items = itemsOf(st.unit, st.component);
+    if (items.length) { st.item = st.item || {}; st.item[itemsKey(st.unit, st.component)] = items[0].n; saveProject(); }
+    else {
+      list.innerHTML = itemBarHTML() + `<div class="empty"><h2>No ${esc(st.component.toLowerCase())}s yet</h2>Each ${esc(st.component.toLowerCase())} at this ${kindWord(st.unit).toLowerCase()} gets its own form.<button class="btn" style="max-width:280px;margin-top:12px" id="it-add2">+ Add ${esc(st.component.toLowerCase())}</button></div>`;
+      bindItemBar(list); $('#it-add2').onclick = addItem; return;
+    }
+  }
+  const ds = defectsHere(st.component);
+  list.innerHTML = (multi ? itemBarHTML() : '') + (ds.length ? '' : `<div class="empty"><h2>No conditions yet</h2>${esc(st.component)} has no defect conditions. Add the first one below.</div>`)
     + ds.map(defectHTML).join('') + `
     <button class="add-row" id="add-defect">+ Add defect condition to ${esc(st.component)}</button>
     ${generalHTML()}`;
   $('#add-defect').onclick = addDefectSheet;
+  if (multi) bindItemBar(list);
   hydrateThumbs(list);
 }
 // The component's General notes & photos box (photos here belong to the unit and component, not one defect).
 function generalHTML() {
-  const st = S.project.state, gid = generalId(st.component), g = getObs(st.unit, gid);
+  const st = S.project.state, gid = itemCid(generalId(st.component), curItem()), g = getObs(st.unit, gid);
   const photos = g ? (g.photoIds || []).map(photoById).filter(Boolean) : [];
-  return `<section class="defect general" data-d="${esc(gid)}"><h3 class="d-title">General notes &amp; photos — ${esc(st.unit)} · ${esc(st.component)}</h3>
+  return `<section class="defect general" data-d="${esc(gid)}"><h3 class="d-title">General notes &amp; photos — ${esc(st.unit)} · ${esc(st.component)}${curItem() ? ' · ' + esc(itemLabel(st.unit, st.component, curItem())) : ''}</h3>
       <div class="d-actions">
         <button class="chip${photos.length ? ' has' : ''}" data-act="photo">📷 Photo${photos.length ? ' · ' + photos.length : ''}</button>
         <button class="chip" data-act="attach">Link unlinked</button>
@@ -2307,7 +2512,7 @@ function generalHTML() {
 function renderDefect(id) {
   const el = document.querySelector(`.defect[data-d="${CSS.escape(id)}"]`); if (!el) return;
   if (isGeneral(id)) {
-    if (id !== generalId(S.project.state.component)) return;
+    if (id !== itemCid(generalId(S.project.state.component), curItem())) return;
     const tmp = document.createElement('div'); tmp.innerHTML = generalHTML();
     el.replaceWith(tmp.firstElementChild); hydrateThumbs(document.querySelector(`.defect[data-d="${CSS.escape(id)}"]`)); return;
   }
@@ -2318,6 +2523,9 @@ document.addEventListener('click', e => {
   const list = e.target.closest('#list'); if (!list) return;
   const sec = e.target.closest('.defect[data-d]'); if (!sec) return;
   const id = sec.dataset.d;
+  const ed = e.target.closest('[data-edit-def]'); if (ed) { editDefectSheet(ed.dataset.editDef); return; }
+  const ch = e.target.closest('[data-ch]'); if (ch) { setAnswer(id, ch.dataset.ch); return; }
+  const oth = e.target.closest('[data-ch-other]'); if (oth) { const o = getObs(ctx().unit, id), d = defectById(id); if (o && o.ans && !d.choices.includes(o.ans)) { setAnswer(id, o.ans); return; } S.openNotes.add('other|' + id); renderDefect(id); const t = document.querySelector(`[data-ans="${CSS.escape(id)}"]`); t && t.focus(); return; }
   const r = e.target.closest('.res'); if (r) { setResult(id, r.dataset.r); return; }
   const th = e.target.closest('[data-photo]'); if (th) { viewPhoto(th.dataset.photo); return; }
   const a = e.target.closest('[data-act]'); if (!a) return;
@@ -2325,7 +2533,102 @@ document.addEventListener('click', e => {
   if (a.dataset.act === 'note') { S.openNotes.add(id); renderDefect(id); const t = document.querySelector(`[data-note="${id}"]`); t && t.focus(); }
   if (a.dataset.act === 'attach') attachToDefect(id);
 });
-document.addEventListener('input', e => { const t = e.target.closest('[data-note]'); if (t) saveNote(t.dataset.note, t.value); });
+document.addEventListener('input', e => {
+  const t = e.target.closest('[data-note]'); if (t) saveNote(t.dataset.note, t.value);
+  const a = e.target.closest('[data-ans]');
+  if (a) {
+    const id = a.dataset.ans; saveNote(id, a.value, 'ans');
+    const sec = a.closest('.defect'); if (sec && a.value.trim()) sec.querySelectorAll('.na-nr .res').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    const dec = document.querySelector(`[data-dec="${CSS.escape(id)}"]`);
+    if (dec) { const d = defectById(id), v = parseMeasure(a.value); dec.textContent = a.value.trim() ? (v == null ? '⚠ not a number' : '= ' + v + (d && d.units ? ' ' + d.units : '')) : ''; }
+    clearTimeout(progT); progT = setTimeout(renderProgress, 400);
+  }
+});
+let progT;
+// Tap a choice to pick it; tap it again to clear it.
+async function setAnswer(defectId, v) {
+  await flushNotes();
+  const o = await ensureObs(ctx().unit, defectId);
+  o.ans = o.ans === v ? '' : v; if (o.ans) o.value = '';
+  o.updatedAt = Date.now(); o.inspector = S.settings.initials;
+  await put('obs', o);
+  S.openNotes.delete('other|' + defectId);
+  renderDefect(defectId); renderProgress();
+}
+
+/* ---------- Items (each window / door): add, step, rename, delete ---------- */
+function setItem(n) { const st = S.project.state; st.item = st.item || {}; st.item[itemsKey(st.unit, st.component)] = n; }
+async function addItem() {
+  const p = S.project, st = p.state; if (!st.unit || !isMulti(st.component)) return;
+  const k = itemsKey(st.unit, st.component); p.inst = p.inst || {};
+  const list = p.inst[k] = p.inst[k] || [];
+  const n = Math.max(0, ...list.map(x => x.n)) + 1;
+  list.push({ n, label: `${st.component} ${n}`, at: Date.now() });
+  setItem(n); await saveProject(); render(); window.scrollTo(0, 0);
+  toast(`${st.component} ${n} added`);
+}
+async function stepItem(dir) {
+  const st = S.project.state, items = itemsOf(st.unit, st.component), i = items.findIndex(x => x.n === curItem());
+  const nx = items[i + dir]; if (!nx) return;
+  await flushNotes(); setItem(nx.n); await saveProject(); render(); window.scrollTo(0, 0);
+}
+function bindItemBar(root) {
+  const b = id => root.querySelector('#' + id);
+  if (b('it-prev')) b('it-prev').onclick = () => stepItem(-1);
+  if (b('it-next')) b('it-next').onclick = () => stepItem(1);
+  if (b('it-add')) b('it-add').onclick = addItem;
+  if (b('it-pick')) b('it-pick').onclick = pickItem;
+}
+function itemData(unit, comp, n) {
+  const ids = new Set([...defectsFor(comp).map(d => itemCid(d.id, n)), itemCid(generalId(comp), n)]);
+  const obs = [...S.obs.values()].filter(o => o.unit === unit && ids.has(o.defectId));
+  const photos = S.photos.filter(ph => ph.unit === unit && ph.defectIds.some(x => ids.has(x)));
+  return { ids, obs, results: obs.filter(recorded).length, notes: obs.filter(o => o.notes && o.notes.trim()).length, photos };
+}
+function pickItem() {
+  const p = S.project, st = p.state, comp = st.component, unit = st.unit;
+  const draw = el => {
+    const items = itemsOf(unit, comp);
+    $('.sheet-body', el).innerHTML = items.length ? `<ul class="list">${items.map(it => { const pr = itemProgress(unit, comp, it.n); const done = pr.total && pr.n === pr.total;
+      return `<li><div class="item-row"><button data-it="${it.n}" aria-current="${it.n === curItem()}"><span>${esc(it.label)}</span><span class="meta${done ? ' done' : ''}">${done ? '✓ ' : ''}${pr.n}/${pr.total}</span></button>
+        <button class="mini" data-it-ren="${it.n}">Rename</button><button class="mini red" data-it-del="${it.n}">Delete</button></div></li>`; }).join('')}</ul>`
+      : `<p class="note">No ${esc(comp.toLowerCase())}s at this ${kindWord(unit).toLowerCase()} yet.</p>`;
+  };
+  openSheet({
+    title: `${comp}s at ${unit}`, body: '', foot: `<button class="btn" id="it-add3">+ Add ${esc(comp.toLowerCase())}</button>`,
+    mount(el, close) {
+      draw(el);
+      $('#it-add3', el).onclick = () => { close(); addItem(); };
+      el.querySelector('.sheet-body').addEventListener('click', async e => {
+        const go = e.target.closest('[data-it]'); if (go) { await flushNotes(); setItem(+go.dataset.it); await saveProject(); close(); render(); return; }
+        const rn = e.target.closest('[data-it-ren]'); if (rn) { const n = +rn.dataset.itRen; const v = await promptSheet(`Rename ${itemLabel(unit, comp, n)}`, 'Name', itemLabel(unit, comp, n)); if (v == null) return;
+          const it = itemsOf(unit, comp).find(x => x.n === n); if (!v.trim()) { toast('Enter a name'); return; } it.label = v.trim(); for (const ph of itemData(unit, comp, n).photos) { syncExport(ph); await savePhotoMeta(ph); } await saveProject(); draw(el); render(); return; }
+        const dl = e.target.closest('[data-it-del]'); if (dl) { await deleteItem(unit, comp, +dl.dataset.itDel); draw(el); render(); }
+      });
+    }
+  });
+}
+async function deleteItem(unit, comp, n) {
+  const p = S.project, lbl = itemLabel(unit, comp, n), x = itemData(unit, comp, n);
+  const lost = [x.results && `${x.results} result${x.results > 1 ? 's' : ''}`, x.notes && `${x.notes} note${x.notes > 1 ? 's' : ''}`].filter(Boolean).join(' and ');
+  if (!await confirmSheet(`Delete ${lbl}?`, `${lost ? `Its ${lost} will be deleted.` : 'It has no results or notes yet.'}${x.photos.length ? ` Its ${x.photos.length} photo${x.photos.length > 1 ? 's go' : ' goes'} back to Unlinked (photos are never deleted).` : ''}`, 'Delete', true)) return false;
+  await flushNotes();
+  for (const ph of x.photos) for (const id of [...ph.defectIds]) if (x.ids.has(id)) await unlinkPhoto(ph, id);
+  await deleteObsWhere(o => o.unit === unit && x.ids.has(o.defectId));
+  const k = itemsKey(unit, comp); p.inst[k] = (p.inst[k] || []).filter(it => it.n !== n);
+  if (curItem() === null && p.inst[k].length) setItem(p.inst[k][p.inst[k].length - 1].n);
+  await saveProject(); toast(`${lbl} deleted`); return true;
+}
+// A one-line text question. Resolves with the text, or null if cancelled.
+function promptSheet(title, label, value) {
+  return new Promise(res => {
+    let done = false;
+    openSheet({ title, body: `<div class="field"><label for="pr-in">${esc(label)}</label><input id="pr-in" value="${esc(value || '')}" autocomplete="off"></div>`,
+      foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="pr-ok">Save</button>`,
+      mount(el, close) { const i = $('#pr-in', el); i.focus(); i.select(); const ok = () => { done = true; close(); res(i.value); }; $('#pr-ok', el).onclick = ok; i.onkeydown = e => { if (e.key === 'Enter') ok(); }; },
+      onClose() { if (!done) res(null); } });
+  });
+}
 
 function attachToDefect(defectId) {
   const ps = trayPhotos(); const d = condById(defectId);
@@ -2501,12 +2804,15 @@ async function openSettings() {
 function photoRef(x) { return { name: x.name, path: photoPath(x) }; }
 function appModelParts() {
   const p = S.project;
+  // typed answers (1.10.0) travel as the value: numbers converted to decimal, text and choices as written
+  const valueOf = o => { if (o.value) return o.value; const a = o.ans != null ? String(o.ans).trim() : ''; if (!a) return ''; const d = defectById(o.defectId);
+    if (answerOf(d) === 'number') { const v = parseMeasure(a); return v == null ? a : String(v); } return a; };
   const obs = [...S.obs.values()].map(o => ({ unit: o.unit, defectId: o.defectId, component: o.component, general: isGeneral(o.defectId),
-    value: o.value || '', notes: o.notes || '', photos: (o.photoIds || []).map(photoById).filter(Boolean).map(photoRef),
+    value: valueOf(o), ans: o.ans || '', notes: o.notes || '', photos: (o.photoIds || []).map(photoById).filter(Boolean).map(photoRef),
     inspector: o.inspector || '', updatedAt: o.updatedAt || 0 }));
   const photos = S.photos.map(x => ({ name: x.name, path: photoPath(x), kind: x.kind || 'photo', origName: origNameOf(x), unit: x.unit, component: x.component,
     defectIds: x.defectIds || [], takenAt: x.takenAt, initials: x.initials || '', takenDuring: x.takenDuring || '', movedFrom: x.movedFrom || '', size: x.size || 0 }));
-  const project = { number: p.number, name: p.name || '', units: p.units, components: p.components, defects: p.defects, roofBy: p.roofBy || 'unit', bldgComps: p.bldgComps || [] };
+  const project = { number: p.number, name: p.name || '', units: p.units, components: p.components, defects: p.defects, roofBy: p.roofBy || 'unit', bldgComps: p.bldgComps || [], multiComps: p.multiComps || [], inst: p.inst || {} };
   return { project, obs, photos };
 }
 // What each unit + condition looks like right now (only ones with something recorded).
@@ -2518,10 +2824,11 @@ function snapshotOf(obs) {
   }
   return snap;
 }
-function describeCondition(defectId, comp) {
-  if (isGeneral(defectId)) return { component: comp || String(defectId).split('::')[1] || '', code: '', label: 'General notes & photos' };
+function describeCondition(defectId, comp, unit) {
+  const { base, n } = splitCid(defectId);
+  if (isGeneral(defectId)) { const c = comp || String(base).split('::')[1] || ''; return { component: c, code: '', label: (n ? itemLabel(unit || '', c, n) + ': ' : '') + 'General notes & photos' }; }
   const d = defectById(defectId);
-  return d ? { component: d.component, code: d.code || '', label: d.label } : { component: comp || '', code: '', label: defectId };
+  return d ? { component: d.component, code: d.code || '', label: (n ? itemLabel(unit || '', d.component, n) + ': ' : '') + d.label } : { component: comp || '', code: '', label: defectId };
 }
 async function workbookBlob() {
   const p = S.project, now = Date.now(), by = S.settings.initials || '';
@@ -2829,8 +3136,9 @@ function templateWorkbook() {
   proj.B1.z = '@';   // text, so Excel keeps 267180.00 instead of turning it into 267180
   const units = XLSX.utils.aoa_to_sheet([['Unit', 'Address', 'Schedule'], ['101', '1200 Example Way #101', ''], ['102', '1200 Example Way #102', 2], ['103', '1200 Example Way #103', ''], ['201', '1200 Example Way #201', 1], ['202', '1200 Example Way #202', ''], ['203', '1200 Example Way #203', 3]]);
   units['!cols'] = [{ wch: 10 }, { wch: 32 }, { wch: 10 }];
-  const defects = XLSX.utils.aoa_to_sheet([['Component', 'Code', 'Defect'], ...DEMO_DEFECTS]);
-  defects['!cols'] = [{ wch: 14 }, { wch: 8 }, { wch: 60 }];
+  const defects = XLSX.utils.aoa_to_sheet([['Component', 'Code', 'Defect', 'Answer', 'Choices', 'Units', 'Multiple'], ...DEMO_DEFECTS,
+    [], ['Answer: leave blank for 1 / 0 / NA / NR, or Number, Text or Choice. Choices: the options for a Choice, separated by commas (add "Other" to allow a typed answer). Units: shown next to a Number (any format is accepted, e.g. 41 1/2 or 3\'-6"; the spreadsheet gets decimals). Multiple: Yes on a component\'s rows gives one form per item (each window, each door), added on site with + Add.']]);
+  defects['!cols'] = [{ wch: 18 }, { wch: 8 }, { wch: 52 }, { wch: 10 }, { wch: 50 }, { wch: 8 }, { wch: 9 }];
   XLSX.utils.book_append_sheet(wb, proj, 'Project');
   XLSX.utils.book_append_sheet(wb, units, 'Units');
   const bldgs = XLSX.utils.aoa_to_sheet([['Building', 'Description', 'Schedule']]);
@@ -2841,10 +3149,14 @@ function templateWorkbook() {
 }
 const DEMO_DEFECTS = [
   ['Stucco', 'ST-1', 'Cracking at window/door corners'], ['Stucco', 'ST-2', 'Missing or inadequate weep screed clearance'], ['Stucco', 'ST-3', 'Staining / efflorescence below openings'], ['Stucco', 'ST-4', 'Improper control joint spacing'],
-  ['Roofs', 'RF-1', 'Cracked or slipped tiles'], ['Roofs', 'RF-2', 'Missing kick-out flashing at roof-wall'], ['Roofs', 'RF-3', 'Inadequate headlap at valleys'],
-  ['Attics', 'AT-1', 'Inadequate insulation depth'], ['Attics', 'AT-2', 'Missing or blocked ventilation baffles'], ['Attics', 'AT-3', 'Water staining on sheathing'],
-  ['Windows', 'WN-1', 'Missing or reversed sill pan flashing'], ['Windows', 'WN-2', 'Failed sealant at perimeter'], ['Windows', 'WN-3', 'Water staining at interior sill'],
-  ['Doors', 'DR-1', 'No threshold pan flashing'], ['Doors', 'DR-2', 'Weatherstrip gaps / daylight visible'], ['Doors', 'DR-3', 'Corrosion at hardware or frame'],
+  ['Roof', 'RF-1', 'Flat or S-tiles?', 'Choice', 'Flat, S-tile'], ['Roof', 'RF-2', '# of cracked or slipped tiles', 'Number', '', 'count'], ['Roof', 'RF-3', 'Roof tile slope', 'Number', '', 'in./ft'], ['Roof', 'RF-4', 'Missing kick-out flashing at roof-wall'],
+  ['Attic', 'AT-1', 'Inadequate insulation depth'], ['Attic', 'AT-2', 'Missing or blocked ventilation baffles'], ['Attic', 'AT-3', 'Water staining on sheathing'],
+  ['Window', 'WN-1', 'Window type', 'Choice', 'Single Hung, Double Hung, Horizontal Slider, Casement, Fixed, Other', '', 'Yes'], ['Window', 'WN-2', 'AAMA label? If so, list the rating.', 'Text', '', '', 'Yes'],
+  ['Window', 'WN-3', 'Missing or reversed sill pan flashing', '', '', '', 'Yes'], ['Window', 'WN-4', 'Water staining at interior sill', '', '', '', 'Yes'],
+  ['Entry Door', 'ED-1', 'Weatherstrip gaps / daylight visible', '', '', '', 'Yes'], ['Entry Door', 'ED-2', 'Corrosion at hardware or frame', '', '', '', 'Yes'],
+  ['Sliding Glass Door', 'SG-1', 'AAMA label? If so, list the rating.', 'Text', '', '', 'Yes'], ['Sliding Glass Door', 'SG-2', 'Breaches, discontinuities, or cracks in the frame', '', '', '', 'Yes'],
+  ['Patio Door', 'PD-1', 'Problems opening, closing door (binding)', '', '', '', 'Yes'],
+  ['Deck', 'DK-1', 'Guardrail height', 'Number', '', 'in.'], ['Deck', 'DK-2', 'Deck surface type', 'Text'],
 ];
 function downloadTemplate() {
   const out = XLSX.write(templateWorkbook(), { bookType: 'xlsx', type: 'array' });

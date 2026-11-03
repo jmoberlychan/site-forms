@@ -281,8 +281,15 @@ function buildCombinedModel(sheets, resolutions, now) {
   const defects = base.defects.map(d => ({ ...d })), defMap = new Map(defects.map(d => [d.id, d]));
   const components = [...base.components];
   const bldgComps = [...(base.bldgComps || [])];                     // 1.9.0: components recorded at buildings
+  const multiComps = [...(base.multiComps || [])];                   // 1.10.0: one form per item (windows, doors)
+  // items (Window 1, 2…) at each unit: matched across inspectors by unit and number; the newest export's names win
+  const inst = {};
+  for (const s of [...srcs].reverse()) for (const [k, list] of Object.entries(s.data.project.inst || {})) {
+    const m = new Map((inst[k] || []).map(x => [x.n, x])); for (const it of list) m.set(it.n, { n: it.n, label: it.label }); inst[k] = [...m.values()].sort((a, b) => a.n - b.n);
+  }
   for (const s of srcs.slice(1)) {
     for (const c of s.data.project.bldgComps || []) if (!bldgComps.includes(c)) bldgComps.push(c);
+    for (const c of s.data.project.multiComps || []) if (!multiComps.includes(c)) multiComps.push(c);
     for (const u of s.data.project.units) if (!unitSet.has(u.label)) { units.push({ ...u }); unitSet.add(u.label); }
     for (const d of s.data.project.defects) if (!defMap.has(d.id)) { const c = { ...d }; defects.push(c); defMap.set(d.id, c); }
     for (const c of s.data.project.components) if (!components.includes(c)) components.push(c);
@@ -304,16 +311,20 @@ function buildCombinedModel(sheets, resolutions, now) {
     const notes = e.filter(z => z.n && z.n.trim()).map(z => e.length > 1 || srcs.length > 1 ? `${z.by}: ${z.n.trim()}` : z.n.trim()).join('\n');
     const latest = [...e].sort((a, b) => b.at - a.at)[0];
     let value = vals[0] || '', conflict = null;
-    const d = defMap.get(x.defectId);
+    const d = defMap.get(splitCid(x.defectId).base);
     if (vals.length > 1) {
       const sig = withV.map(z => z.by + '=' + z.v).join(';');
       const prev = resolutions.get(k);
       let note = '';
-      if (prev && prev.res && prev.sig === sig) { value = prev.res; conflict = 'Resolved'; }
+      // 1.10.0: a typed answer (number, text, choice) is resolved by typing the right answer; numbers in any format
+      const ty = d && d.answer && d.answer !== 'result' ? d.answer : null;
+      let pres = prev ? prev.res : '';
+      if (prev && ty && prev.raw) { const up = prev.raw.toUpperCase(); pres = up === 'NA' || up === 'NR' ? up : ty === 'number' ? (parseMeasure(prev.raw) != null ? String(parseMeasure(prev.raw)) : '') : prev.raw; }
+      if (prev && pres && prev.sig === sig) { value = pres; conflict = 'Resolved'; }
       else {
         value = ''; conflict = 'Unresolved';
-        if (prev && prev.res && prev.sig !== sig) note = `Was resolved as ${prev.res}, but the inspectors’ results have changed since. Check again.`;
-        else if (prev && prev.raw && !prev.res) note = `“${prev.raw}” isn’t a valid result: use 1, 0, NA or NR.`;
+        if (prev && pres && prev.sig !== sig) note = `Was resolved as ${pres}, but the inspectors’ results have changed since. Check again.`;
+        else if (prev && prev.raw && !pres) note = ty === 'number' ? `“${prev.raw}” isn’t a number.` : `“${prev.raw}” isn’t a valid result: use 1, 0, NA or NR.`;
       }
       conflicts.push({ status: conflict, key: k, sig, unit: x.unit, defectId: x.defectId, component: d ? d.component : x.component, code: d ? d.code : '', label: d ? d.label : x.defectId,
         entries: withV, resolved: conflict === 'Resolved' ? value : '', note: [note, ...e.filter(z => z.n && z.n.trim()).map(z => `${z.by}: ${z.n.trim()}`)].filter(Boolean).join('\n'),
@@ -323,13 +334,13 @@ function buildCombinedModel(sheets, resolutions, now) {
       recordedBy: withV.map(z => `${z.by}: ${z.v}`).join('; '), inspector: latest.by, updatedAt: latest.at });
   }
   const uIdx = new Map(units.map((u, i) => [u.label, i])), dIdx = new Map(defects.map((d, i) => [d.id, i]));
-  conflicts.sort((a, b) => (a.status === b.status ? 0 : a.status === 'Unresolved' ? -1 : 1) || (uIdx.get(a.unit) ?? 1e9) - (uIdx.get(b.unit) ?? 1e9) || (dIdx.get(a.defectId) ?? 1e9) - (dIdx.get(b.defectId) ?? 1e9));
+  conflicts.sort((a, b) => (a.status === b.status ? 0 : a.status === 'Unresolved' ? -1 : 1) || (uIdx.get(a.unit) ?? 1e9) - (uIdx.get(b.unit) ?? 1e9) || (dIdx.get(splitCid(a.defectId).base) ?? 1e9) - (dIdx.get(splitCid(b.defectId).base) ?? 1e9) || (splitCid(a.defectId).n || 0) - (splitCid(b.defectId).n || 0));
   const phSeen = new Set(), photos = [];
   for (const s of srcs) for (const ph of s.data.photos) if (!phSeen.has(ph.path)) { phSeen.add(ph.path); photos.push(ph); }
   const changeLog = srcs.flatMap(s => s.data.log || []);
   const inspectors = [...new Set(srcs.map(s => s.data.inspector))].sort();
   return {
-    project: { number: base.number, name: base.name, units, components, defects, roofBy: base.roofBy || 'unit', bldgComps },
+    project: { number: base.number, name: base.name, units, components, defects, roofBy: base.roofBy || 'unit', bldgComps, multiComps, inst },
     obs, photos, changeLog, conflicts,
     meta: { combined: true, exportedAt: now, inspectors, sources: srcs.map(s => ({ by: s.data.inspector, file: s.name, at: s.data.exportedAt })) },
   };
