@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.4';
+const APP_VERSION = '1.10.5';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -1716,6 +1716,7 @@ function pickUnit(kind) {
         const q = s.value.trim().toLowerCase();
         el.querySelectorAll('li').forEach(li => li.hidden = q && !li.dataset.q.includes(q));
         el.querySelectorAll('.list-h').forEach(h => h.hidden = !!q);
+        $('.sheet-body', el).scrollTop = 0;
       };
       el.querySelector('.sheet-body').addEventListener('click', async e => {
         const b = e.target.closest('[data-unit]'); if (!b) return;
@@ -2128,7 +2129,7 @@ function chooseUnit(title, exclude) {
       foot: `<button class="btn ghost" data-close>Cancel</button>`,
       mount(el, close) {
         const s = $('.search', el);
-        s.oninput = () => { const q = s.value.trim().toLowerCase(); el.querySelectorAll('li').forEach(li => li.hidden = q && !li.dataset.q.includes(q)); el.querySelectorAll('.list-h').forEach(h => h.hidden = !!q); };
+        s.oninput = () => { const q = s.value.trim().toLowerCase(); el.querySelectorAll('li').forEach(li => li.hidden = q && !li.dataset.q.includes(q)); el.querySelectorAll('.list-h').forEach(h => h.hidden = !!q); $('.sheet-body', el).scrollTop = 0; };
         el.querySelector('.sheet-body').addEventListener('click', e => { const b = e.target.closest('[data-pick-unit]'); if (!b) return; done = true; close(); res(b.dataset.pickUnit); });
       },
       onClose() { if (!done) res(null); }

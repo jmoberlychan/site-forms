@@ -517,3 +517,5 @@ video.pv-img { touch-action: auto; }
 .zoom-ic { position: absolute; top: 2px; right: 2px; width: 28px; height: 28px; border-radius: 7px; background: rgba(0,0,0,.6); color: #fff; font-size: 16px; line-height: 28px; text-align: center; }
 .sheet-body .thumb { touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .thumb img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }
+/* 1.10.5: the search box stays at the top of unit / building lists while the results scroll */
+.sheet-body > .search { position: sticky; top: -4px; z-index: 3; margin: 0 0 8px; box-shadow: 0 0 0 8px var(--card), 0 12px 10px -8px rgba(0,0,0,.18); }
