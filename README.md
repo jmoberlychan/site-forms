@@ -41,6 +41,8 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
 7. **Photos, either order:**
    - *Defect first:* tap **📷 Photo** on a condition. The photo is linked to that condition.
    - *Photo first:* tap the big **Photo** button. Afterwards, link the photo to a condition (**Link** or **Link + 1**), or keep it unlinked and take more. To review unlinked photos later, open **Unlinked**, select the best shot and link it. Unlinked photos belong to the unit, not the component: every component at that unit sees them, grouped by the component they were taken under (they never carry over to another unit). For example, roof photos taken while you were on Stucco can be linked later from Roofs. A photo linked to another component's condition moves into that component's folder, and the Photo Log's **Taken during** column records where it was taken. Photos taken at the wrong unit can be moved: in **Unlinked**, select one or more photos, tap **Move**, and pick the unit (scheduled units are listed first, and you can search). When roofs are recorded by building, buildings are listed after the units, so a roof photo taken from a unit can be moved to its building and linked there. They become unlinked photos at that unit, under the same component, and export into that unit's folder. The Photo Log's **Moved from unit** column records where they were taken.
+   - **Full-screen preview** (from 1.10.3): tap the **⤢** corner of a photo in **Unlinked** or the **Link unlinked** picker (or a photo in the strip shown after taking one) to see it full screen. Pinch or double-tap to zoom in (up to 8×), drag to look around, swipe or use **‹ ›** for the next photo, and tap **Select** to pick it for linking or moving.
+   - **Photos can't be deleted** (from 1.10.3): every photo is renamed and numbered when it's taken, so none can be removed from the app. A photo taken by mistake can simply stay unlinked.
    - *Batches:* **Photos before linking** (– 1…10 +, above the camera button) sets how many photos you take before linking them all to one condition. You can change it at any time, including mid-batch.
    - **Video:** in the camera, swipe to **Video** (or tap the video icon) and record. Videos are named, sorted, linked and exported exactly like photos (for example `267180.00 2026-10-28 JJM 0043.mov`) and share the same numbering. They're stored as recorded, so they use a lot of space: about 60–200 MB per minute.
    - Photos and videos taken earlier with the iPhone Camera app can be added from **Menu → Add photos & videos from library**.
@@ -131,7 +133,7 @@ Always open the app from its Home Screen icon. If it's opened in a Safari tab in
 
 Photos taken before version 1.7.2 keep their old names (`<Project#>_<Initials>_<YYYYMMDD>_<####>.jpg`), so spreadsheets and folders already exported still match.
 
-The number restarts at 0001 each day for each inspector. The date is included so names never repeat across days. Deleted photo numbers are not reused, even if the project is deleted and imported again under the same project number.
+The number restarts at 0001 each day for each inspector. The date is included so names never repeat across days. Photos can't be deleted in the app (from 1.10.3), so every number stays accounted for; a photo taken by mistake can be left unlinked. Photo numbers are never reused, even if the project is deleted and imported again under the same project number.
 
 ## The spreadsheet
 
@@ -155,7 +157,7 @@ Units, components and conditions that are no longer in the file are kept if they
 - Photos are kept inside the app's private storage on the iPhone. They are not in the Photos app or iCloud Drive, and nothing is deleted automatically when a project ends.
 - iOS decides how much space the app may use. It's a share of the phone's free space, so freeing space on the phone raises the limit. **Settings & storage** shows how much is used.
 - Space is cleared automatically once the PC has confirmed it has the photos (see above).
-- A removed photo keeps its thumbnail and its links. Unlinking or deleting one asks you to confirm first, so the wrong photo isn't unlinked by mistake. Removed photos can't be moved to another unit, because their exported copy is already in that unit's folder.
+- A removed photo keeps its thumbnail and its links. Unlinking one asks you to confirm first, so the wrong photo isn't unlinked by mistake. Removed photos can't be moved to another unit, because their exported copy is already in that unit's folder.
 - **Settings & storage → Free up space** still works as before: it removes every exported full-size photo, whether or not the PC has confirmed it. Thumbnails, results and links stay.
 - When a project is finished and everything is exported and saved, delete it from **Menu → Projects**.
 
@@ -167,7 +169,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
 
 To go back to a version, upload **all the files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 

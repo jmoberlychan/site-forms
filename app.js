@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.2';
+const APP_VERSION = '1.10.3';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -755,8 +755,9 @@ function hydrateThumbs(root) {
 function thumbHTML(p, opts = {}) {
   const sel = opts.selectable && S.selecting.has(p.id);
   return `<button class="thumb${sel ? ' sel' : ''}" data-photo="${p.id}" aria-label="Photo ${esc(p.name)}">
-    <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}</button>`;
+    <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}${opts.zoom ? zoomIcon(p.id) : ''}</button>`;
 }
+const zoomIcon = id => `<span class="zoom-ic" data-zoom="${id}" role="button" aria-label="View full screen">⤢</span>`;
 // Index of photos by id, rebuilt automatically whenever the photo list is replaced or grows/shrinks
 let pIdx = null, pIdxArr = null, pIdxLen = -1;
 function photoById(id) {
@@ -829,7 +830,7 @@ function batchSheet() {
       draw = () => {
         const n = b.photos.length, N = batchSize();
         $('h2', el).textContent = `Photo ${n} of ${Math.max(N, n)} saved`;
-        $('.sheet-body', el).innerHTML = `<div class="preview-strip">${b.photos.map(p => thumbHTML(p, { badge: '#' + p.seq })).join('')}</div>
+        $('.sheet-body', el).innerHTML = `<div class="preview-strip">${b.photos.map(p => thumbHTML(p, { badge: '#' + p.seq, zoom: true })).join('')}</div>
           <p class="note">${d ? `Linking to <b>${esc(d.label)}</b>.` : 'You’ll link the whole batch to a condition when it’s done.'}</p>${stepperHTML()}`;
         $('.sheet-foot', el).innerHTML = n >= N
           ? `<button class="btn" id="b-done">${d ? 'Done' : `Link ${n} photos`}</button>`
@@ -839,6 +840,7 @@ function batchSheet() {
       draw();
       document.addEventListener('batchchange', draw);
       el.addEventListener('click', e => {
+        const pv = e.target.closest('.preview-strip [data-photo]'); if (pv) { previewPhotos(b.photos.map(x => x.id), b.photos.findIndex(x => x.id === pv.dataset.photo)); return; }
         if (e.target.id === 'b-next') { handled = true; close(); capture(b.defectId, true); }
         if (e.target.id === 'b-done') { handled = true; close(); finishBatch(); }
       });
@@ -1858,7 +1860,7 @@ function editListsSheet() {
         const b = e.target.closest('[data-du],[data-dc],[data-dd],[data-ec],[data-ed]'); if (!b) return;
         if (b.dataset.du != null) {
           const label = b.dataset.du, W = kindWord(label), w = W.toLowerCase();
-          if (S.photos.some(ph => ph.unit === label)) { alertSheet(`Can’t delete this ${w} yet`, `${W} ${label} has photos. Delete or keep its photos first — deleting the ${w} would leave them without a folder.`); return; }
+          if (S.photos.some(ph => ph.unit === label)) { alertSheet(`Can’t delete this ${w}`, `${W} ${label} has photos, so it can’t be deleted (photos are never deleted, and they need its folder). Unlinked photos taken here by mistake can be moved to another unit from Unlinked → Move.`); return; }
           const has = [...S.obs.values()].some(o => o.unit === label && (o.value || o.notes));
           if (!await confirmSheet(`Delete ${w} ${label}?`, has ? `Its recorded results and notes will be deleted too.` : 'It has no results yet.', 'Delete', true)) return;
           await deleteObsWhere(o => o.unit === label);
@@ -2031,7 +2033,7 @@ function linkSheet(photos, fresh) {
   const n = photos.length;
   openSheet({
     title: fresh ? (n > 1 ? `${n} photos saved — link them?` : 'Photo saved — link it?') : `Link ${n} photo${n > 1 ? 's' : ''}`,
-    body: `<div class="preview-strip">${photos.map(p => thumbHTML(p)).join('')}</div>
+    body: `<div class="preview-strip">${photos.map(p => thumbHTML(p, { zoom: true })).join('')}</div>
       <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective (for a count, measurement or other typed answer: <b>Link + answer</b>). Unlinked photos stay in this ${kindWord(unit).toLowerCase()}’s folder.</p>
       <div><div class="link-row general-row top"><span><b>General photo</b> · ${esc(component)}<span class="sub">For this ${kindWord(unit).toLowerCase()} and component, not one particular condition</span></span><span class="acts"><button class="mini" data-link="${esc(gidHere)}">Link</button></span></div>
       ${ds.map(d => {
@@ -2046,6 +2048,7 @@ function linkSheet(photos, fresh) {
       : `<button class="btn ghost" data-close>Cancel</button>`,
     mount(el, close) {
       el.addEventListener('click', async e => {
+        const pv = e.target.closest('.preview-strip [data-photo]'); if (pv) { previewPhotos(photos.map(x => x.id), photos.findIndex(x => x.id === pv.dataset.photo)); return; }
         const b = e.target.closest('[data-link],[data-link1],[data-linkans]'); if (!b) return;
         const id = b.dataset.link || b.dataset.link1 || b.dataset.linkans; const v = b.dataset.link1 ? '1' : null;
         for (const p of photos) await linkPhoto(p, id, v);
@@ -2066,11 +2069,11 @@ function openTray() {
     const ps = trayPhotos();
     $('.sheet-body', el).innerHTML = ps.length
       ? `<p class="note">Unlinked photos at ${kindWord(ctx().unit).toLowerCase()} <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. Taken at the wrong ${hasBldgs() ? 'unit or building' : 'unit'}? Select them and tap <b>Move</b>.</p>
-         ${trayGroupsHTML(ps, p => thumbHTML(p, { selectable: true, badge: '#' + p.seq }))}`
+         ${trayGroupsHTML(ps, p => thumbHTML(p, { selectable: true, badge: '#' + p.seq, zoom: true }))}`
       : `<div class="empty"><h2>No unlinked photos</h2>Photos taken with the big camera button land here until you link them.</div>`;
     const n = S.selecting.size;
-    $('.sheet-foot', el).innerHTML = `<button class="btn ghost" id="t-del" ${n ? '' : 'disabled'}>Delete${n ? ' ' + n : ''}</button>
-      <button class="btn ghost" id="t-all" ${ps.length ? '' : 'disabled'}>${n === ps.length && n ? 'Clear' : 'Select all'}</button>
+    // 1.10.3: photos can't be deleted (every photo is renamed and numbered when it's taken, and numbers are never reused)
+    $('.sheet-foot', el).innerHTML = `      <button class="btn ghost" id="t-all" ${ps.length ? '' : 'disabled'}>${n === ps.length && n ? 'Clear' : 'Select all'}</button>
       <button class="btn ghost" id="t-move" ${n ? '' : 'disabled'}>Move${n ? ' ' + n : ''}…</button>
       <button class="btn" id="t-link" ${n ? '' : 'disabled'}>Link${n ? ' ' + n : ''}…</button>`;
     hydrateThumbs(el);
@@ -2081,6 +2084,8 @@ function openTray() {
       draw(el);
       el.addEventListener('click', async e => {
         const t = e.target.closest('[data-photo]');
+        const z = e.target.closest('[data-zoom]');
+        if (z) { const ps = trayPhotos(); previewPhotos(ps.map(x => x.id), ps.findIndex(x => x.id === z.dataset.zoom), { isSel: id => S.selecting.has(id), toggle: id => { S.selecting.has(id) ? S.selecting.delete(id) : S.selecting.add(id); draw(el); } }); return; }
         if (t && el.contains(t)) { const id = t.dataset.photo; S.selecting.has(id) ? S.selecting.delete(id) : S.selecting.add(id); draw(el); return; }
         if (e.target.id === 't-all') { const ps = trayPhotos(); if (S.selecting.size === ps.length) S.selecting.clear(); else ps.forEach(p => S.selecting.add(p.id)); draw(el); }
         if (e.target.id === 't-link') { const ps = [...S.selecting].map(photoById).filter(Boolean); close(); linkSheet(ps, false); }
@@ -2094,13 +2099,6 @@ function openTray() {
           if (r.moved) toast(`Moved ${pl(r.moved)} to ${kindWord(to).toLowerCase()} ${to}`);
           if (r.removed) alertSheet('Some photos stayed here', `${pl(r.removed)} ${r.removed === 1 ? 'was' : 'were'} already exported and removed from this phone (Free up space), so ${r.removed === 1 ? 'it stays' : 'they stay'} in ${kindWord(from).toLowerCase()} ${from}, where ${r.removed === 1 ? 'it was' : 'they were'} exported.`);
           else if (!r.moved) toast('Nothing was moved');
-        }
-        if (e.target.id === 't-del') {
-          const ids = [...S.selecting];
-          if (await confirmSheet('Delete photos?', `Delete ${ids.length} photo${ids.length > 1 ? 's' : ''} from this phone? Their numbers won’t be reused.`, 'Delete', true)) {
-            for (const id of ids) { const p = photoById(id); if (p) await deletePhoto(p); }
-            draw(el); render();
-          }
         }
       });
     },
@@ -2315,6 +2313,48 @@ function zoomable(img) {
   };
   img.addEventListener('pointerup', up); img.addEventListener('pointercancel', up);
 }
+/* ---------- Full-screen photo preview (1.10.3) ----------
+   The photo fills the screen: pinch or double-tap to zoom, drag to look around, swipe (or ‹ ›) for the next one.
+   opts.isSel / opts.toggle add a Select button (Unlinked, and the Link unlinked picker). */
+function previewPhotos(ids, start = 0, opts = {}) {
+  ids = ids.filter(id => photoById(id)); if (!ids.length) return;
+  let i = Math.max(0, Math.min(ids.length - 1, start)), url = null;
+  const ov = document.createElement('div'); ov.className = 'pv'; ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-label', 'Photo preview');
+  document.body.appendChild(ov);
+  const close = () => { if (url) URL.revokeObjectURL(url); ov.remove(); document.removeEventListener('keydown', key); };
+  const key = e => { if (e.key === 'Escape') close(); if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1); };
+  document.addEventListener('keydown', key);
+  async function show() {
+    const p = photoById(ids[i]); if (url) { URL.revokeObjectURL(url); url = null; }
+    const blob = hasBlob(p) ? await get('blobs', p.id) : null; if (blob) url = URL.createObjectURL(blob);
+    const src = url || await thumbSrc(p.id);
+    const during = p.component ? (p.defectIds.length ? p.component : 'taken during ' + p.component) : '';
+    ov.innerHTML = `<div class="pv-top"><span class="pv-info"><b>${i + 1} of ${ids.length}</b> · #${p.seq}${during ? ' · ' + esc(during) : ''}${url ? '' : ' · thumbnail only'}</span><button class="pv-x" aria-label="Close">✕</button></div>
+      <div class="pv-stage">${isVideo(p) && url ? `<video class="pv-img" src="${url}" controls playsinline></video>` : `<img class="pv-img" src="${src}" alt="" draggable="false">`}</div>
+      <div class="pv-bot"><button class="pv-nav" data-pv="-1" ${i ? '' : 'disabled'} aria-label="Previous">‹</button>
+        ${opts.toggle ? `<button class="pv-sel${opts.isSel(p.id) ? ' on' : ''}">${opts.isSel(p.id) ? '✓ Selected' : 'Select'}</button>` : `<span class="pv-hint">Pinch or double-tap to zoom</span>`}
+        <button class="pv-nav" data-pv="1" ${i < ids.length - 1 ? '' : 'disabled'} aria-label="Next">›</button></div>`;
+    const img = $('img.pv-img', ov); if (img) { zoomable(img); swipe(img); }
+  }
+  function go(d) { const n = i + d; if (n < 0 || n >= ids.length) return; i = n; show(); }
+  // swipe left / right to move on, only while the photo isn't zoomed in
+  function swipe(img) {
+    let sx = null, sy = 0, multi = false;
+    img.addEventListener('pointerdown', e => { if (sx === null) { sx = e.clientX; sy = e.clientY; multi = false; } else multi = true; });
+    img.addEventListener('pointerup', e => {
+      if (sx === null) return; const dx = e.clientX - sx, dy = e.clientY - sy; const was = sx; sx = null;
+      if (multi || img.classList.contains('zoomed') || was === null) return;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) go(dx < 0 ? 1 : -1);
+    });
+    img.addEventListener('pointercancel', () => { sx = null; });
+  }
+  ov.addEventListener('click', e => {
+    if (e.target.closest('.pv-x')) { close(); return; }
+    const n = e.target.closest('[data-pv]'); if (n) { go(+n.dataset.pv); return; }
+    if (e.target.closest('.pv-sel')) { opts.toggle(ids[i]); const on = opts.isSel(ids[i]), b = $('.pv-sel', ov); b.classList.toggle('on', on); b.textContent = on ? '✓ Selected' : 'Select'; }
+  });
+  show();
+}
 async function viewPhoto(id) {
   const p = photoById(id); if (!p) return;
   const blob = hasBlob(p) ? await get('blobs', id) : null; const url = blob ? URL.createObjectURL(blob) : '';
@@ -2336,7 +2376,7 @@ async function viewPhoto(id) {
       ${comp && vg && !p.defectIds.includes(vg) ? `<div class="link-row general-row"><span><b>General photo</b> · ${esc(comp)}<span class="sub">Not one particular condition</span></span><span class="acts"><button class="mini" data-link="${esc(vg)}">Link</button></span></div>` : ''}`;
   };
   openSheet({
-    title: 'Photo', body: '', foot: `<button class="btn danger" id="v-del">Delete photo</button>`,
+    title: 'Photo', body: '', foot: `<button class="btn" data-close>Done</button>`,
     mount(el, close) {
       draw(el); zoomable($('.viewer-img.zoomable', el));
       el.addEventListener('click', async e => {
@@ -2354,11 +2394,6 @@ async function viewPhoto(id) {
           draw(el); zoomable($('.viewer-img.zoomable', el)); render();
           if (b.dataset.linkans) askAnswer(p.unit, b.dataset.linkans);
           return;
-        }
-        if (e.target.id === 'v-del' && await confirmSheet('Delete photo?', p.removed
-            ? `${p.name} was already exported and removed from this phone; only its thumbnail is left. Deleting it also removes the thumbnail and its links, so the next spreadsheet export won’t list it. The exported file on the PC isn’t affected. Its number won’t be reused.`
-            : `Delete ${p.name} from this phone? Its number won’t be reused.`, 'Delete', true)) {
-          await deletePhoto(p); close(); render(); toast('Photo deleted');
         }
       });
     },
@@ -2681,11 +2716,14 @@ function attachToDefect(defectId) {
     mount(el, close) {
       const grid = $('#pick-grid', el);
       const draw = () => {
-        grid.innerHTML = trayGroupsHTML(ps, p => `<button class="thumb${chosen.has(p.id) ? ' sel' : ''}" data-pick="${p.id}"><img data-thumb="${p.id}" alt="">${chosen.has(p.id) ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}<span class="badge">#${p.seq}</span></button>`);
+        grid.innerHTML = trayGroupsHTML(ps, p => `<button class="thumb${chosen.has(p.id) ? ' sel' : ''}" data-pick="${p.id}"><img data-thumb="${p.id}" alt="">${chosen.has(p.id) ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}<span class="badge">#${p.seq}</span>${zoomIcon(p.id)}</button>`);
         hydrateThumbs(grid); $('#go', el).disabled = !chosen.size; $('#go', el).textContent = 'Link' + (chosen.size ? ' ' + chosen.size : '');
       };
       draw();
-      grid.onclick = e => { const b = e.target.closest('[data-pick]'); if (!b) return; const id = b.dataset.pick; chosen.has(id) ? chosen.delete(id) : chosen.add(id); draw(); };
+      grid.onclick = e => {
+        const z = e.target.closest('[data-zoom]');
+        if (z) { previewPhotos(ps.map(x => x.id), ps.findIndex(x => x.id === z.dataset.zoom), { isSel: id => chosen.has(id), toggle: id => { chosen.has(id) ? chosen.delete(id) : chosen.add(id); draw(); } }); return; }
+        const b = e.target.closest('[data-pick]'); if (!b) return; const id = b.dataset.pick; chosen.has(id) ? chosen.delete(id) : chosen.add(id); draw(); };
       $('#go', el).onclick = async () => { for (const id of chosen) await linkPhoto(photoById(id), defectId, null); close(); renderDefect(defectId); renderProgress(); toast('Linked'); };
     }
   });

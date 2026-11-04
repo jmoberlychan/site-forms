@@ -500,3 +500,18 @@ html.in-browser .tag { top: var(--bb-h, 32px); }
 .res.ch[aria-pressed="true"] { background: var(--ans); border-color: var(--ans); color: #fff; }
 .defect[data-v="ans"] .ans-in { border-color: var(--ans); }
 .vchip[data-v="ans"] { background: var(--ans); color: #fff; border-color: var(--ans); }
+/* full-screen photo preview (1.10.3) */
+.pv { position: fixed; inset: 0; z-index: 200; background: #000; color: #fff; display: flex; flex-direction: column; padding: var(--safe-t) 0 var(--safe-b); }
+.pv-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 8px 8px 14px; font-size: 15px; color: #ddd; }
+.pv-info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-x { flex: 0 0 auto; min-width: 48px; min-height: 44px; border: 0; border-radius: 10px; background: rgba(255,255,255,.15); color: #fff; font-size: 20px; }
+.pv-stage { flex: 1; min-height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.pv-img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; transform-origin: center center; will-change: transform; }
+video.pv-img { touch-action: auto; }
+.pv-bot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px 14px; }
+.pv-nav { min-width: 64px; min-height: 52px; border: 0; border-radius: 12px; background: rgba(255,255,255,.15); color: #fff; font-size: 30px; }
+.pv-nav:disabled { opacity: .25; }
+.pv-sel { flex: 1; min-height: 52px; border-radius: 12px; border: 2px solid #fff; background: transparent; color: #fff; font-size: 17px; font-weight: 700; }
+.pv-sel.on { background: var(--focus); border-color: var(--focus); }
+.pv-hint { flex: 1; text-align: center; color: #aaa; font-size: 14px; }
+.zoom-ic { position: absolute; top: 2px; right: 2px; width: 28px; height: 28px; border-radius: 7px; background: rgba(0,0,0,.6); color: #fff; font-size: 16px; line-height: 28px; text-align: center; }
