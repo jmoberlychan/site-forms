@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.3';
+const APP_VERSION = '1.10.4';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -755,7 +755,7 @@ function hydrateThumbs(root) {
 function thumbHTML(p, opts = {}) {
   const sel = opts.selectable && S.selecting.has(p.id);
   return `<button class="thumb${sel ? ' sel' : ''}" data-photo="${p.id}" aria-label="Photo ${esc(p.name)}">
-    <img data-thumb="${p.id}" alt="">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}${opts.zoom ? zoomIcon(p.id) : ''}</button>`;
+    <img data-thumb="${p.id}" alt="" draggable="false">${sel ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}${opts.badge ? `<span class="badge">${esc(opts.badge)}</span>` : ''}${opts.zoom ? zoomIcon(p.id) : ''}</button>`;
 }
 const zoomIcon = id => `<span class="zoom-ic" data-zoom="${id}" role="button" aria-label="View full screen">⤢</span>`;
 // Index of photos by id, rebuilt automatically whenever the photo list is replaced or grows/shrinks
@@ -2082,7 +2082,9 @@ function openTray() {
     title: 'Unlinked photos', body: '', foot: ' ',
     mount(el, close) {
       draw(el);
+      dragSelect($('.sheet-body', el), 'photo', id => S.selecting.has(id), (id, on) => { on ? S.selecting.add(id) : S.selecting.delete(id); }, () => draw(el));
       el.addEventListener('click', async e => {
+        if (dragJustEnded()) return;
         const t = e.target.closest('[data-photo]');
         const z = e.target.closest('[data-zoom]');
         if (z) { const ps = trayPhotos(); previewPhotos(ps.map(x => x.id), ps.findIndex(x => x.id === z.dataset.zoom), { isSel: id => S.selecting.has(id), toggle: id => { S.selecting.has(id) ? S.selecting.delete(id) : S.selecting.add(id); draw(el); } }); return; }
@@ -2312,6 +2314,56 @@ function zoomable(img) {
     seed();
   };
   img.addEventListener('pointerup', up); img.addEventListener('pointercancel', up);
+}
+/* ---------- Drag to select several photos (1.10.4), like the iPhone Photos app ----------
+   Put a finger on a photo and slide sideways (then up or down to take in whole rows): every photo between the first
+   and the one under the finger is selected, or deselected if the first one was already selected. A swipe that starts
+   up or down still scrolls; a tap still toggles one photo. */
+let dragEndedAt = 0;
+const dragJustEnded = () => Date.now() - dragEndedAt < 350;
+function dragSelect(box, attr, isSel, setSel, done) {
+  const sel = '[data-' + attr + ']', idOf = el => el.dataset[attr];
+  let st = null;
+  const mark = (el, on) => {
+    el.classList.toggle('sel', on);
+    let c = el.querySelector('.chk');
+    if (on && !c) { c = document.createElement('span'); c.className = 'chk'; c.textContent = '✓'; el.appendChild(c); }
+    if (!on && c) c.remove();
+  };
+  const scroller = () => box.closest('.sheet-body') || box;
+  const update = (x, y) => {
+    const hit = document.elementFromPoint(x, y); const cur = hit && hit.closest(sel);
+    if (!cur || !box.contains(cur)) return;
+    const all = [...box.querySelectorAll(sel)], a = all.indexOf(st.el), b = all.indexOf(cur); if (a < 0 || b < 0) return;
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    all.forEach((el, i) => { const id = idOf(el), on = i >= lo && i <= hi ? st.mode : st.before.get(id); setSel(id, on); mark(el, on); });
+  };
+  const edgeScroll = y => {
+    const sc = scroller(), r = sc.getBoundingClientRect();
+    clearInterval(st.timer); st.timer = null;
+    const v = y > r.bottom - 50 ? 12 : y < r.top + 50 ? -12 : 0;
+    if (v) st.timer = setInterval(() => { sc.scrollTop += v; if (st) update(st.lx, st.ly); }, 30);
+  };
+  box.addEventListener('pointerdown', e => {
+    const el = e.target.closest(sel); if (!el || !box.contains(el) || e.target.closest('[data-zoom]')) return;
+    const all = [...box.querySelectorAll(sel)];
+    st = { el, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, active: false, mode: !isSel(idOf(el)), before: new Map(all.map(x => [idOf(x), isSel(idOf(x))])), pid: e.pointerId, timer: null };
+  });
+  box.addEventListener('pointermove', e => {
+    if (!st || e.pointerId !== st.pid) return;
+    st.lx = e.clientX; st.ly = e.clientY;
+    const dx = e.clientX - st.x, dy = e.clientY - st.y;
+    if (!st.active) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) >= Math.abs(dx)) { st = null; return; }   // an up-or-down swipe: let it scroll
+      if (Math.abs(dx) < 10) return;
+      st.active = true; try { box.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+    e.preventDefault(); update(e.clientX, e.clientY); edgeScroll(e.clientY);
+  });
+  box.addEventListener('touchmove', e => { if (st && st.active) e.preventDefault(); }, { passive: false });
+  box.addEventListener('dragstart', e => { if (e.target.closest(sel)) e.preventDefault(); });   // no native image dragging   // iPhone: don't scroll while selecting
+  const end = () => { if (!st) return; const was = st.active; clearInterval(st.timer); st = null; if (was) { dragEndedAt = Date.now(); done(); } };
+  box.addEventListener('pointerup', end); box.addEventListener('pointercancel', end);
 }
 /* ---------- Full-screen photo preview (1.10.3) ----------
    The photo fills the screen: pinch or double-tap to zoom, drag to look around, swipe (or ‹ ›) for the next one.
@@ -2716,11 +2768,13 @@ function attachToDefect(defectId) {
     mount(el, close) {
       const grid = $('#pick-grid', el);
       const draw = () => {
-        grid.innerHTML = trayGroupsHTML(ps, p => `<button class="thumb${chosen.has(p.id) ? ' sel' : ''}" data-pick="${p.id}"><img data-thumb="${p.id}" alt="">${chosen.has(p.id) ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}<span class="badge">#${p.seq}</span>${zoomIcon(p.id)}</button>`);
+        grid.innerHTML = trayGroupsHTML(ps, p => `<button class="thumb${chosen.has(p.id) ? ' sel' : ''}" data-pick="${p.id}"><img data-thumb="${p.id}" alt="" draggable="false">${chosen.has(p.id) ? '<span class="chk">✓</span>' : ''}${isVideo(p) ? '<span class="play" aria-hidden="true">▶</span>' : ''}<span class="badge">#${p.seq}</span>${zoomIcon(p.id)}</button>`);
         hydrateThumbs(grid); $('#go', el).disabled = !chosen.size; $('#go', el).textContent = 'Link' + (chosen.size ? ' ' + chosen.size : '');
       };
       draw();
+      dragSelect(grid, 'pick', id => chosen.has(id), (id, on) => { on ? chosen.add(id) : chosen.delete(id); }, () => draw());
       grid.onclick = e => {
+        if (dragJustEnded()) return;
         const z = e.target.closest('[data-zoom]');
         if (z) { previewPhotos(ps.map(x => x.id), ps.findIndex(x => x.id === z.dataset.zoom), { isSel: id => chosen.has(id), toggle: id => { chosen.has(id) ? chosen.delete(id) : chosen.add(id); draw(); } }); return; }
         const b = e.target.closest('[data-pick]'); if (!b) return; const id = b.dataset.pick; chosen.has(id) ? chosen.delete(id) : chosen.add(id); draw(); };
