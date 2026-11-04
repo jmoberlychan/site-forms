@@ -522,7 +522,10 @@ video.pv-img { touch-action: auto; }
 /* 1.10.6: thumbnail size in Unlinked / Link unlinked (Small = 72px, Medium = 3 a row, Large = 2 a row) */
 .tsz-seg { margin: 0 0 8px; }
 .tsz-m .thumbs .thumb { width: calc((100% - 12px) / 3); height: auto; aspect-ratio: 1; }
-.tsz-l .thumbs .thumb { width: calc((100% - 6px) / 2); height: auto; aspect-ratio: 4 / 3; }
+.tsz-l .thumbs .thumb { width: calc((100% - 6px) / 2); height: auto; aspect-ratio: 1; }
+/* 1.10.7: at Medium and Large the whole photo is shown, never stretched or cropped (portrait and landscape alike) */
+.tsz-m .thumbs .thumb, .tsz-l .thumbs .thumb { background: #1d2321; }
+.tsz-m .thumbs .thumb img, .tsz-l .thumbs .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .tsz-m .thumbs .badge, .tsz-l .thumbs .badge { font-size: 13px; }
 .tsz-l .zoom-ic, .tsz-m .zoom-ic { width: 34px; height: 34px; line-height: 34px; font-size: 19px; }
 #t-all, #t-move, #t-link { flex: 1 1 0; min-width: 0; padding-left: 6px; padding-right: 6px; white-space: nowrap; }

@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.6';
+const APP_VERSION = '1.10.7';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -577,12 +577,23 @@ function loadImg(blob) {
     i.src = u;
   });
 }
+// 1.10.7: iPhone Safari limits one canvas to about 16.7 million pixels and all canvases together to a few hundred MB,
+// and doesn't free a canvas until it's garbage-collected. A 24 MP iPhone 17 Pro photo was over the first limit, and a
+// few hundred photos in a row ran out of the second, so drawing silently produced nothing. Now: the canvas is kept
+// under 16 MP, released straight after use, and a photo that still can't be drawn is reported, never stored empty.
+const CANVAS_MAX_PX = 16e6;
 function canvasBlob(img, maxSide, q) {
   const w = img.naturalWidth, h = img.naturalHeight;
-  const s = Math.min(1, maxSide / Math.max(w, h));
-  const c = document.createElement('canvas'); c.width = Math.round(w * s); c.height = Math.round(h * s);
-  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-  return new Promise(res => c.toBlob(b => res(b), 'image/jpeg', q));
+  if (!w || !h) return Promise.reject(new Error('Image could not be read'));
+  const s = Math.min(1, maxSide / Math.max(w, h), Math.sqrt(CANVAS_MAX_PX / (w * h)));
+  const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+  const g = c.getContext('2d');
+  if (!g) { c.width = c.height = 0; return Promise.reject(new Error('Out of memory for photos — close other apps and try fewer at once')); }
+  g.drawImage(img, 0, 0, c.width, c.height);
+  return new Promise((res, rej) => c.toBlob(b => {
+    c.width = c.height = 0;   // give the canvas memory back now
+    if (b && b.size) res(b); else rej(new Error('Out of memory for photos — close other apps and try fewer at once'));
+  }, 'image/jpeg', q));
 }
 // Daily photo numbers are counted per PROJECT NUMBER + initials + day (not per stored project), so deleting and
 // re-creating a project, or two projects with the same number, can never reuse a photo name. Counters are never deleted.
@@ -624,6 +635,7 @@ async function addPhotos(files, linkDefectId) {
         if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) full = await canvasBlob(img, S.settings.photoMax, 0.88);
         else if (!isJpeg) full = await canvasBlob(img, 1e9, 0.92);   // PNG / HEIC etc.: a real JPEG at full size, matching the .jpg name
         thumb = await canvasBlob(img, 480, 0.72);   // 1.10.6: 480 px (was 320) so Large thumbnails stay sharp
+        img.removeAttribute('src');   // 1.10.7: drop the decoded picture now rather than whenever Safari gets round to it
       }
       const takenAt = Date.now();
       const dk = dateKey(takenAt);
@@ -644,6 +656,7 @@ async function addPhotos(files, linkDefectId) {
       S.photos.push(meta); added.push(meta);
       if (linkDefectId) await linkPhoto(meta, linkDefectId, null, true);
     } catch (e) { failed.push({ file: f, err: e }); }
+    if (list.length > 1) await new Promise(r => setTimeout(r, 0));   // 1.10.7: let the phone catch its breath between photos
   }
   busy(null);
   if (failed.length) rescueFiles(failed);
