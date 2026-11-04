@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.5';
+const APP_VERSION = '1.10.6';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -623,7 +623,7 @@ async function addPhotos(files, linkDefectId) {
         const isJpeg = /^image\/jpe?g$/i.test(f.type || '') || (!f.type && /\.jpe?g$/i.test(f.name || ''));
         if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) full = await canvasBlob(img, S.settings.photoMax, 0.88);
         else if (!isJpeg) full = await canvasBlob(img, 1e9, 0.92);   // PNG / HEIC etc.: a real JPEG at full size, matching the .jpg name
-        thumb = await canvasBlob(img, 320, 0.7);
+        thumb = await canvasBlob(img, 480, 0.72);   // 1.10.6: 480 px (was 320) so Large thumbnails stay sharp
       }
       const takenAt = Date.now();
       const dk = dateKey(takenAt);
@@ -2069,7 +2069,7 @@ function openTray() {
   const draw = (el) => {
     const ps = trayPhotos();
     $('.sheet-body', el).innerHTML = ps.length
-      ? `<p class="note">Unlinked photos at ${kindWord(ctx().unit).toLowerCase()} <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. Taken at the wrong ${hasBldgs() ? 'unit or building' : 'unit'}? Select them and tap <b>Move</b>.</p>
+      ? `${sizeSegHTML()}<p class="note">Unlinked photos at ${kindWord(ctx().unit).toLowerCase()} <b>${esc(ctx().unit)}</b>, from every component. Select the ones that prove a <b>${esc(ctx().component)}</b> condition, then link them. Photos you link from another component move to ${esc(ctx().component)}. Taken at the wrong ${hasBldgs() ? 'unit or building' : 'unit'}? Select them and tap <b>Move</b>.</p>
          ${trayGroupsHTML(ps, p => thumbHTML(p, { selectable: true, badge: '#' + p.seq, zoom: true }))}`
       : `<div class="empty"><h2>No unlinked photos</h2>Photos taken with the big camera button land here until you link them.</div>`;
     const n = S.selecting.size;
@@ -2082,10 +2082,11 @@ function openTray() {
   openSheet({
     title: 'Unlinked photos', body: '', foot: ' ',
     mount(el, close) {
-      draw(el);
+      draw(el); applyThumbSize($('.sheet-body', el));
       dragSelect($('.sheet-body', el), 'photo', id => S.selecting.has(id), (id, on) => { on ? S.selecting.add(id) : S.selecting.delete(id); }, () => draw(el));
       el.addEventListener('click', async e => {
         if (dragJustEnded()) return;
+        if (sizeClick(e, $('.sheet-body', el))) return;
         const t = e.target.closest('[data-photo]');
         const z = e.target.closest('[data-zoom]');
         if (z) { const ps = trayPhotos(); previewPhotos(ps.map(x => x.id), ps.findIndex(x => x.id === z.dataset.zoom), { isSel: id => S.selecting.has(id), toggle: id => { S.selecting.has(id) ? S.selecting.delete(id) : S.selecting.add(id); draw(el); } }); return; }
@@ -2315,6 +2316,15 @@ function zoomable(img) {
     seed();
   };
   img.addEventListener('pointerup', up); img.addEventListener('pointercancel', up);
+}
+/* ---------- Thumbnail size in Unlinked and the Link unlinked picker (1.10.6) ---------- */
+const THUMB_SIZES = [['s', 'Small'], ['m', 'Medium'], ['l', 'Large']];
+const thumbSize = () => THUMB_SIZES.some(x => x[0] === S.settings.thumbSize) ? S.settings.thumbSize : 's';
+function sizeSegHTML() { return `<div class="seg tsz-seg" role="radiogroup" aria-label="Photo size">${THUMB_SIZES.map(([v, l]) => `<button role="radio" data-tsz="${v}" aria-checked="${thumbSize() === v}">${l}</button>`).join('')}</div>`; }
+function applyThumbSize(box) { if (!box) return; box.classList.remove('tsz-s', 'tsz-m', 'tsz-l'); box.classList.add('tsz-' + thumbSize()); box.querySelectorAll('[data-tsz]').forEach(b => b.setAttribute('aria-checked', b.dataset.tsz === thumbSize())); }
+function sizeClick(e, box) {
+  const b = e.target.closest('[data-tsz]'); if (!b) return false;
+  S.settings.thumbSize = b.dataset.tsz; saveSettings(); applyThumbSize(box); return true;
 }
 /* ---------- Drag to select several photos (1.10.4), like the iPhone Photos app ----------
    Put a finger on a photo and slide sideways (then up or down to take in whole rows): every photo between the first
@@ -2764,7 +2774,7 @@ function attachToDefect(defectId) {
   const chosen = new Set();
   openSheet({
     title: 'Link unlinked photos',
-    body: `<p class="note">Pick the photos that prove <b>${esc(d.label)}</b>. Unlinked photos from every component at this ${kindWord(ctx().unit).toLowerCase()} are shown.</p><div id="pick-grid"></div>`,
+    body: `${sizeSegHTML()}<p class="note">Pick the photos that prove <b>${esc(d.label)}</b>. Unlinked photos from every component at this ${kindWord(ctx().unit).toLowerCase()} are shown.</p><div id="pick-grid"></div>`,
     foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="go" disabled>Link</button>`,
     mount(el, close) {
       const grid = $('#pick-grid', el);
@@ -2773,6 +2783,7 @@ function attachToDefect(defectId) {
         hydrateThumbs(grid); $('#go', el).disabled = !chosen.size; $('#go', el).textContent = 'Link' + (chosen.size ? ' ' + chosen.size : '');
       };
       draw();
+      applyThumbSize($('.sheet-body', el)); $('.sheet-body', el).addEventListener('click', e => sizeClick(e, $('.sheet-body', el)));
       dragSelect(grid, 'pick', id => chosen.has(id), (id, on) => { on ? chosen.add(id) : chosen.delete(id); }, () => draw());
       grid.onclick = e => {
         if (dragJustEnded()) return;

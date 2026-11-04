@@ -434,7 +434,7 @@ html.cam-open, html.cam-open body { overflow: hidden; }
 /* v1.5.0: unlinked photos grouped by the component they were taken under */
 .tray-h { font-size: 13px; font-weight: 700; color: var(--muted); margin: 12px 0 6px; }
 /* v1.5.1: four buttons in the Unlinked window sit in a tidy 2 × 2 grid */
-.sheet-foot:has(#t-move) { display: grid; grid-template-columns: 1fr 1fr; }
+.sheet-foot:has(#t-move) { display: grid; grid-template-columns: 1fr 1fr 1fr; }
 
 /* ---------- v1.6.0 screen zoom lock ---------- */
 /* pan only (no pinch-zoom) and no double-tap zoom while locked; the camera viewfinder keeps its own gestures */
@@ -519,3 +519,10 @@ video.pv-img { touch-action: auto; }
 .thumb img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }
 /* 1.10.5: the search box stays at the top of unit / building lists while the results scroll */
 .sheet-body > .search { position: sticky; top: -4px; z-index: 3; margin: 0 0 8px; box-shadow: 0 0 0 8px var(--card), 0 12px 10px -8px rgba(0,0,0,.18); }
+/* 1.10.6: thumbnail size in Unlinked / Link unlinked (Small = 72px, Medium = 3 a row, Large = 2 a row) */
+.tsz-seg { margin: 0 0 8px; }
+.tsz-m .thumbs .thumb { width: calc((100% - 12px) / 3); height: auto; aspect-ratio: 1; }
+.tsz-l .thumbs .thumb { width: calc((100% - 6px) / 2); height: auto; aspect-ratio: 4 / 3; }
+.tsz-m .thumbs .badge, .tsz-l .thumbs .badge { font-size: 13px; }
+.tsz-l .zoom-ic, .tsz-m .zoom-ic { width: 34px; height: 34px; line-height: 34px; font-size: 19px; }
+#t-all, #t-move, #t-link { flex: 1 1 0; min-width: 0; padding-left: 6px; padding-right: 6px; white-space: nowrap; }
