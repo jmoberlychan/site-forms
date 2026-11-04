@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.1';
+const APP_VERSION = '1.10.2';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -2464,7 +2464,9 @@ function defectHTML(d) {
   const o = getObs(unit, d.id) || { value: '', notes: '', photoIds: [] };
   const photos = o.photoIds.map(photoById).filter(Boolean);
   const open = S.openNotes.has(d.id) || !!o.notes;
-  return `<section class="defect" data-d="${d.id}" data-v="${o.value}">
+  // 1.10.2: a recorded choice, text or number colours the condition (blue), like 1 / 0 / NA / NR do
+  const dv = o.value || (isTyped(d) && o.ans != null && String(o.ans).trim() ? 'ans' : '');
+  return `<section class="defect" data-d="${d.id}" data-v="${dv}">
     <h3 class="d-title">${d.code ? `<span class="code">${esc(d.code)}</span>` : ''}${esc(d.label)}${d.units ? ` <span class="added">${esc(d.units)}</span>` : ''}${d.added ? ' <button class="added edit-added" data-edit-def="' + esc(d.baseId || d.id) + '">Added on site · Edit</button>' : d.orphan ? ' <span class="added">No longer in the import file</span>' : ''}</h3>
     ${isTyped(d) ? answerHTML(d, o) : `<div class="results" role="group" aria-label="Result">
       ${RESULTS.map(r => `<button class="res" data-r="${r}" aria-pressed="${o.value === r}">${r}</button>`).join('')}
@@ -2575,7 +2577,8 @@ document.addEventListener('input', e => {
   const a = e.target.closest('[data-ans]');
   if (a) {
     const id = a.dataset.ans; saveNote(id, a.value, 'ans');
-    const sec = a.closest('.defect'); if (sec && a.value.trim()) sec.querySelectorAll('.na-nr .res').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    const sec = a.closest('.defect');
+    if (sec) { if (a.value.trim()) { sec.querySelectorAll('.na-nr .res').forEach(b => b.setAttribute('aria-pressed', 'false')); sec.dataset.v = 'ans'; } else if (sec.dataset.v === 'ans') sec.dataset.v = ''; }
     const dec = document.querySelector(`[data-dec="${CSS.escape(id)}"]`);
     if (dec) { const d = defectById(id), v = parseMeasure(a.value); dec.textContent = a.value.trim() ? (v == null ? '⚠ not a number' : '= ' + v + (d && d.units ? ' ' + d.units : '')) : ''; }
     clearTimeout(progT); progT = setTimeout(renderProgress, 400);

@@ -12,6 +12,7 @@
   --na: #6B7772;
   --nr: #C77700;
   --focus: #2C6BED;
+  --ans: #2C6BED;
   --radius: 10px;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
@@ -30,6 +31,7 @@
     --r0: #3DBE7A;
     --na: #8D9A95;
     --nr: #F2A332;
+    --ans: #5B8DEF;
     color-scheme: dark;
   }
 }
@@ -97,6 +99,7 @@ main { padding: 10px 10px calc(110px + var(--safe-b)); max-width: 760px; margin:
 .defect[data-v="0"] { border-left-color: var(--r0); }
 .defect[data-v="NA"] { border-left-color: var(--na); }
 .defect[data-v="NR"] { border-left-color: var(--nr); }
+.defect[data-v="ans"] { border-left-color: var(--ans); }
 .d-title { font-weight: 650; font-size: 17px; margin: 0 0 10px; }
 .d-title .code { color: var(--muted); font-weight: 500; margin-right: 6px; }
 .results { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
@@ -494,3 +497,6 @@ html.in-browser .tag { top: var(--bb-h, 32px); }
 .list .item-row .mini { width: auto; flex: 0 0 auto; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; justify-content: center; }
 .list .item-row .mini.red { border-color: var(--r1); }
 .mini.dark { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.res.ch[aria-pressed="true"] { background: var(--ans); border-color: var(--ans); color: #fff; }
+.defect[data-v="ans"] .ans-in { border-color: var(--ans); }
+.vchip[data-v="ans"] { background: var(--ans); color: #fff; border-color: var(--ans); }
