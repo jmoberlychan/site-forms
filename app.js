@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.10.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -1990,6 +1990,39 @@ async function stepUnit(dir) {
 }
 
 /* ================= Link sheet (photo-first) ================= */
+// The link buttons for a condition (1.10.1): 1/0 conditions get Link and Link + 1; typed ones (number, text, choice)
+// get Link and Link + answer, which links the photo and then asks for the count, measurement or answer.
+function linkActs(d) {
+  return isTyped(d)
+    ? `<button class="mini" data-link="${esc(d.id)}">Link</button><button class="mini dark" data-linkans="${esc(d.id)}">Link + answer</button>`
+    : `<button class="mini" data-link="${esc(d.id)}">Link</button><button class="mini red" data-link1="${esc(d.id)}">Link + 1</button>`;
+}
+// Ask for a typed answer right after linking a photo. Skip leaves it as it was.
+function askAnswer(unit, defectId) {
+  const d = defectById(defectId); if (!d || !isTyped(d)) return;
+  const o = getObs(unit, defectId) || {}, cur = o.ans != null ? String(o.ans) : '';
+  const a = answerOf(d);
+  const save = async v => {
+    await flushNotes();
+    const ob = await ensureObs(unit, defectId);
+    ob.ans = v; if (String(v).trim()) ob.value = ''; ob.updatedAt = Date.now(); ob.inspector = S.settings.initials;
+    await put('obs', ob); render(); toast('Answer saved');
+  };
+  openSheet({
+    title: d.label,
+    body: `<p class="note">Photo linked${d.item ? ' · ' + esc(itemLabel(unit, d.component, d.item)) : ''}. Enter the ${a === 'number' ? (d.units === 'count' ? 'count' : 'measurement') : 'answer'}${d.units && d.units !== 'count' ? ' (' + esc(d.units) + ')' : ''}:</p>
+      ${a === 'choice' ? `<div class="choices">${d.choices.map(c => `<button class="res ch" data-pick-ch="${esc(c)}" aria-pressed="${cur === c}">${esc(c)}</button>`).join('')}</div>${d.other ? `<div class="field" style="margin-top:10px"><label for="aa-in">Other</label><input id="aa-in" class="ans-in" value="${esc(d.choices.includes(cur) ? '' : cur)}" autocomplete="off"></div>` : ''}`
+        : `<div class="ans-row"><input id="aa-in" class="ans-in" value="${esc(cur)}" autocomplete="off" enterkeyhint="done" placeholder="${a === 'number' ? (d.units === 'count' ? 'e.g. 3' : 'e.g. 41 1/2') : 'Type the answer'}"><span class="ans-dec" id="aa-dec"></span></div>`}`,
+    foot: `<button class="btn ghost" data-close>Skip</button>${a === 'choice' && !d.other ? '' : '<button class="btn" id="aa-go">Save</button>'}`,
+    mount(el, close) {
+      const inp = $('#aa-in', el), dec = $('#aa-dec', el);
+      const upd = () => { if (dec && a === 'number') { const v = parseMeasure(inp.value); dec.textContent = inp.value.trim() ? (v == null ? '⚠ not a number' : '= ' + v + (d.units ? ' ' + d.units : '')) : ''; } };
+      if (inp) { if (a !== 'choice') inp.focus(); inp.oninput = upd; upd(); inp.onkeydown = e => { if (e.key === 'Enter') $('#aa-go', el).click(); }; }
+      el.querySelectorAll('[data-pick-ch]').forEach(b => b.onclick = async () => { close(); await save(b.dataset.pickCh); });
+      const go = $('#aa-go', el); if (go) go.onclick = async () => { const v = inp ? inp.value.trim() : ''; close(); if (v) await save(v); };
+    }
+  });
+}
 function linkSheet(photos, fresh) {
   const { component } = ctx();
   const ds = defectsHere(component);
@@ -1999,12 +2032,13 @@ function linkSheet(photos, fresh) {
   openSheet({
     title: fresh ? (n > 1 ? `${n} photos saved — link them?` : 'Photo saved — link it?') : `Link ${n} photo${n > 1 ? 's' : ''}`,
     body: `<div class="preview-strip">${photos.map(p => thumbHTML(p)).join('')}</div>
-      <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective. Unlinked photos stay in this ${kindWord(unit).toLowerCase()}’s folder.</p>
+      <p class="note">${fresh && n === 1 ? esc(photos[0].name) + '<br>' : ''}Tap <b>Link</b> to attach as proof, or <b>Link + 1</b> to also mark the condition defective (for a count, measurement or other typed answer: <b>Link + answer</b>). Unlinked photos stay in this ${kindWord(unit).toLowerCase()}’s folder.</p>
       <div><div class="link-row general-row top"><span><b>General photo</b> · ${esc(component)}<span class="sub">For this ${kindWord(unit).toLowerCase()} and component, not one particular condition</span></span><span class="acts"><button class="mini" data-link="${esc(gidHere)}">Link</button></span></div>
       ${ds.map(d => {
         const o = getObs(unit, d.id);
-        return `<div class="link-row"><span>${d.code ? `<b>${esc(d.code)}</b> ` : ''}${esc(d.label)} ${o && o.value ? `<span class="vchip" data-v="${o.value}">${o.value}</span>` : ''}</span>
-          <span class="acts"><button class="mini" data-link="${d.id}">Link</button><button class="mini red" data-link1="${d.id}">Link + 1</button></span></div>`;
+        const shown = o && (o.value || (isTyped(d) && o.ans ? o.ans : ''));
+        return `<div class="link-row"><span>${d.code ? `<b>${esc(d.code)}</b> ` : ''}${esc(d.label)} ${shown ? `<span class="vchip" data-v="${esc(o.value || 'ans')}">${esc(shown)}</span>` : ''}</span>
+          <span class="acts">${linkActs(d)}</span></div>`;
       }).join('')}
 </div>`,
     foot: fresh
@@ -2012,11 +2046,12 @@ function linkSheet(photos, fresh) {
       : `<button class="btn ghost" data-close>Cancel</button>`,
     mount(el, close) {
       el.addEventListener('click', async e => {
-        const b = e.target.closest('[data-link],[data-link1]'); if (!b) return;
-        const id = b.dataset.link || b.dataset.link1; const v = b.dataset.link1 ? '1' : null;
+        const b = e.target.closest('[data-link],[data-link1],[data-linkans]'); if (!b) return;
+        const id = b.dataset.link || b.dataset.link1 || b.dataset.linkans; const v = b.dataset.link1 ? '1' : null;
         for (const p of photos) await linkPhoto(p, id, v);
         S.selecting.clear(); close(); render();
         toast(`Linked to ${condById(id).label}${v ? ' · marked 1' : ''}`);
+        if (b.dataset.linkans) askAnswer(photos[0].unit, id);
       });
       const again = $('#again', el); if (again) again.onclick = () => { close(); capture(null); };
     }
@@ -2297,7 +2332,7 @@ async function viewPhoto(id) {
       <div class="section-h">Proves</div>
       ${p.defectIds.length ? p.defectIds.map(d => { const df = condById(d); return `<div class="link-row"><span>${esc(df ? df.label : d)}</span><span class="acts"><button class="mini" data-unlink="${d}">Unlink</button></span></div>`; }).join('') : '<p class="note">Not linked to a condition yet.</p>'}
       <div class="section-h">Link to another condition</div>
-      ${ds.filter(d => !p.defectIds.includes(d.id)).map(d => `<div class="link-row"><span>${esc(d.label)}</span><span class="acts"><button class="mini" data-link="${d.id}">Link</button><button class="mini red" data-link1="${d.id}">Link + 1</button></span></div>`).join('')}
+      ${ds.filter(d => !p.defectIds.includes(d.id)).map(d => `<div class="link-row"><span>${esc(d.label)}</span><span class="acts">${linkActs(d)}</span></div>`).join('')}
       ${comp && vg && !p.defectIds.includes(vg) ? `<div class="link-row general-row"><span><b>General photo</b> · ${esc(comp)}<span class="sub">Not one particular condition</span></span><span class="acts"><button class="mini" data-link="${esc(vg)}">Link</button></span></div>` : ''}`;
   };
   openSheet({
@@ -2305,7 +2340,7 @@ async function viewPhoto(id) {
     mount(el, close) {
       draw(el); zoomable($('.viewer-img.zoomable', el));
       el.addEventListener('click', async e => {
-        const b = e.target.closest('[data-unlink],[data-link],[data-link1]');
+        const b = e.target.closest('[data-unlink],[data-link],[data-link1],[data-linkans]');
         if (b) {
           if (b.dataset.unlink) {
             // a removed photo is only a thumbnail here: make unlinking it a deliberate, second step
@@ -2315,8 +2350,10 @@ async function viewPhoto(id) {
             }
             await unlinkPhoto(p, b.dataset.unlink);
           }
-          else await linkPhoto(p, b.dataset.link || b.dataset.link1, b.dataset.link1 ? '1' : null);
-          draw(el); zoomable($('.viewer-img.zoomable', el)); render(); return;
+          else await linkPhoto(p, b.dataset.link || b.dataset.link1 || b.dataset.linkans, b.dataset.link1 ? '1' : null);
+          draw(el); zoomable($('.viewer-img.zoomable', el)); render();
+          if (b.dataset.linkans) askAnswer(p.unit, b.dataset.linkans);
+          return;
         }
         if (e.target.id === 'v-del' && await confirmSheet('Delete photo?', p.removed
             ? `${p.name} was already exported and removed from this phone; only its thumbnail is left. Deleting it also removes the thumbnail and its links, so the next spreadsheet export won’t list it. The exported file on the PC isn’t affected. Its number won’t be reused.`
@@ -2453,7 +2490,7 @@ function answerHTML(d, o) {
       ${d.other && (other || S.openNotes.has('other|' + d.id)) ? `<input class="ans-in" data-ans="${esc(d.id)}" value="${esc(other ? ans : '')}" placeholder="Type the ${esc(d.label.replace(/\?$/, '').toLowerCase())}" autocomplete="off">` : ''}`;
   } else if (a === 'number') {
     const v = parseMeasure(ans);
-    box = `<div class="ans-row"><input class="ans-in num" data-ans="${esc(d.id)}" value="${esc(ans)}" placeholder="${d.units ? 'e.g. 41 1/2 (' + esc(d.units) + ')' : 'Number'}" autocomplete="off" enterkeyhint="done">
+    box = `<div class="ans-row"><input class="ans-in num" data-ans="${esc(d.id)}" value="${esc(ans)}" placeholder="${d.units === 'count' ? 'Count, e.g. 3' : d.units ? 'e.g. 41 1/2 (' + esc(d.units) + ')' : 'Number'}" autocomplete="off" enterkeyhint="done">
       <span class="ans-dec" data-dec="${esc(d.id)}">${ans ? (v == null ? '⚠ not a number' : '= ' + v + (d.units ? ' ' + esc(d.units) : '')) : ''}</span></div>`;
   } else {
     box = `<input class="ans-in" data-ans="${esc(d.id)}" value="${esc(ans)}" placeholder="Type the answer" autocomplete="off" enterkeyhint="done">`;

@@ -493,3 +493,4 @@ html.in-browser .tag { top: var(--bb-h, 32px); }
 .btn.red-text { color: var(--r1); }
 .list .item-row .mini { width: auto; flex: 0 0 auto; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; justify-content: center; }
 .list .item-row .mini.red { border-color: var(--r1); }
+.mini.dark { background: var(--ink); color: var(--paper); border-color: var(--ink); }
