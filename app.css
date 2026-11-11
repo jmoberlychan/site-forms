@@ -622,3 +622,17 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .cam-ctx .geo.on { color: #7fe0a4; }
 .cam-ctx .geo.wait { color: #d6dcd9; }
 .cam-ctx .geo.off { color: #ff8a8a; }
+
+/* 1.14.0: test mode */
+.test-band { position: relative; background: repeating-linear-gradient(135deg, #FF9F0A 0 14px, #FFB340 14px 28px); color: #000; font-size: 14px; padding: calc(var(--safe-t) + 6px) 12px 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.test-band button { border: 0; border-radius: 8px; background: rgba(0,0,0,.8); color: #fff; font: inherit; font-weight: 600; padding: 4px 10px; min-height: 32px; }
+.tp-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.tp-grid .btn { padding-left: 4px; padding-right: 4px; font-size: 15px; }
+.tm-steps { padding-left: 20px; margin: 4px 0 0; }
+.tm-steps li { margin-bottom: 4px; }
+.gen-ov { position: fixed; inset: 0; z-index: 300; background: rgba(0,0,0,.6); display: grid; place-items: center; padding: 24px; }
+.gen-box { background: var(--card); color: var(--ink); border-radius: 16px; padding: 20px; width: min(360px, 100%); display: grid; gap: 12px; }
+.gen-t { font-size: 15px; color: var(--muted); }
+.gen-bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.gen-bar span { display: block; height: 100%; width: 0; background: var(--focus); transition: width .2s; }
+.tag .test-band { margin: -2px -12px 10px; padding: 6px 12px; border-radius: 0; }   /* inside the header: it stays in view and needs no extra status-bar space */

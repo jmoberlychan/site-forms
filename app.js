@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.13.1';
+const APP_VERSION = '1.14.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -10,10 +10,13 @@ const generalId = comp => GENERAL + '::' + comp;
 
 /* ================= IndexedDB ================= */
 let dbp = null;
+// 1.14.0: test mode. A test phone keeps all its data in its own storage, completely separate from the real one.
+const TEST_PHONE = (() => { try { const v = localStorage.getItem('sd-test-phone') || ''; return /^[A-F]$/.test(v) ? v : ''; } catch (_) { return ''; } })();
+const DB_NAME = TEST_PHONE ? 'site-defects-test-' + TEST_PHONE : 'site-defects';
 function db() {
   if (dbp) return dbp;
   dbp = new Promise((res, rej) => {
-    const r = indexedDB.open('site-defects', 1);
+    const r = indexedDB.open(DB_NAME, 1);
     r.onupgradeneeded = () => {
       const d = r.result;
       d.createObjectStore('meta', { keyPath: 'k' });
@@ -60,6 +63,7 @@ async function saveProject() { S.project.updatedAt = Date.now(); await put('proj
 async function loadAll() {
   const s = await get('meta', 'settings');
   if (s) { delete s.k; Object.assign(S.settings, s); }
+  if (TEST_PHONE && !S.settings.initials) { S.settings.initials = 'T' + TEST_PHONE; await saveSettings(); }   // test phone A = inspector TA
   // 1.7.1: ZIPs are no longer built in memory, so parts can be much bigger
   if ((S.settings.partV || 0) < 2) { if (!(S.settings.partMB >= 2048)) S.settings.partMB = 2048; if (S.settings.keepDays == null) S.settings.keepDays = 3; S.settings.partV = 2; }
   S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -868,13 +872,13 @@ async function addPhotos(files, linkDefectId, opts = {}) {
   let geoWait = [...files].some(f => f._takenAt) ? 1500 : 4000;   // wait for a location reading at most once per batch (briefly in the built-in camera)
   for (let i = 0; i < list.length; i++) {
     const f = list[i];
-    if (list.length > 1) busy(`Saving photo ${i + 1} of ${list.length}…`);
+    if (list.length > 1 && !opts.quiet) busy(`Saving photo ${i + 1} of ${list.length}…`);
     try {
       const vid = isVideoFile(f);
       const ext = vid ? videoExt(f) : 'jpg';
       let full = f, thumb, reSaved = false;
       if (vid) {
-        if (list.length === 1) busy('Saving video…');
+        if (list.length === 1 && !opts.quiet) busy('Saving video…');
         thumb = await videoThumb(f); // videos are kept exactly as recorded
       } else if (f._thumb) {
         thumb = f._thumb;   // 1.12.0: built-in camera — already sized and thumbnailed when it was taken, so no second decode here
@@ -926,11 +930,11 @@ async function addPhotos(files, linkDefectId, opts = {}) {
     } catch (e) { failed.push({ file: f, err: e }); }
     if (list.length > 1) await new Promise(r => setTimeout(r, 0));   // 1.10.7: let the phone catch its breath between photos
   }
-  busy(null);
+  if (!opts.quiet) busy(null);
   if (failed.length) rescueFiles(failed);
   if (!persistAsked && navigator.storage && navigator.storage.persist) { persistAsked = true; navigator.storage.persist().catch(() => {}); }
-  if (!CAM.el) { geoStopSoon(); setTimeout(crcIdle, 3000); }
-  checkStorage();
+  if (!CAM.el && !opts.quiet) { geoStopSoon(); setTimeout(crcIdle, 3000); }
+  if (!opts.quiet) checkStorage();
   return added;
 }
 // A photo or video that couldn't be stored (usually: storage full) is not thrown away —
@@ -3270,7 +3274,7 @@ function render() {
   const W = B ? 'Building' : 'Unit';
   const schedTag = unit && unit.sched != null ? `Scheduled${unit.schedLabel && unit.schedLabel !== 'added' ? ' · ' + unit.schedLabel : ''}` : '';
   app.innerHTML = `
-    <header class="tag">
+    <header class="tag">${testBandHTML()}
       <div class="tag-top"><span class="proj">${esc(p.number)}${p.name ? ' · ' + esc(p.name) : ''} · ${esc(S.settings.initials)}</span>
         <button class="icon-btn" id="menu" aria-label="Menu">☰</button></div>
       ${hasBldgs() ? `<div class="view-seg" role="tablist" aria-label="Units or buildings"><button role="tab" data-view="unit" aria-selected="${!B}">Units</button><button role="tab" data-view="building" aria-selected="${B}">Buildings${p.bldgComps && p.bldgComps.length ? ' · ' + esc(p.bldgComps.join(', ')) : ''}</button></div>` : ''}
@@ -3548,7 +3552,7 @@ function attachToDefect(defectId) {
 /* ================= Welcome / settings / menu ================= */
 function renderWelcome(app) {
   const needInitials = !S.settings.initials;
-  app.innerHTML = `<div class="welcome">
+  app.innerHTML = `${testBandHTML()}<div class="welcome">
     <span class="stamp">Site Defects</span>
     <h1>${needInitials ? 'Set up this phone' : 'Load a project'}</h1>
     <p>${needInitials ? 'Your initials go into every photo name, so photos from different inspectors never clash.' : 'Import the project’s Excel file with its unit list and defect list. Everything stays on this phone and works offline.'}</p>
@@ -3556,7 +3560,7 @@ function renderWelcome(app) {
       <button class="btn" id="save-ini" style="width:100%">Continue</button>`
     : `<div class="stack"><button class="btn" id="imp">Import project Excel</button>
        <button class="btn ghost" id="tpl">Get the Excel template</button>
-       <button class="btn ghost" id="demo">Try a demo project</button></div>`}
+       <button class="btn ghost" id="demo">Try a demo project</button>${TEST_PHONE ? '<button class="btn" id="w-gen">Fill with test data</button>' : ''}</div>`}
   </div>`;
   if (needInitials) {
     const i = $('#ini'); i.focus();
@@ -3647,6 +3651,9 @@ async function openSettings() {
       <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
         <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video)</option></select>
         <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
+      <div class="section-h">Test mode</div>
+      <p class="note">${TEST_PHONE ? `This is <b>test phone ${TEST_PHONE}</b>: test data only, kept apart from your real projects and photos.` : 'Try out exporting and combining with lots of made-up data, kept completely apart from your real projects and photos.'}</p>
+      <button class="btn ghost" id="s-test" style="width:100%">${TEST_PHONE ? 'Test mode…' : 'Open test mode…'}</button>
       <div class="kv"><span>Photo check (stored copies)</span><span>${S.photos.filter(x => !x.removed && !isVideo(x) && x.crcV).length} of ${S.photos.filter(x => !x.removed && !isVideo(x)).length} checked${S.photos.some(x => x.crcWas != null) ? ` · <b class="warn">${S.photos.filter(x => x.crcWas != null).length} changed in storage (exported correctly from 1.13.1)</b>` : ''}</span></div>
       <div class="field"><label>Photo location</label><p class="note" style="margin:0">${GEO.err === 'denied' ? '<b class="warn">Off — photos don’t record where they were taken.</b> To turn it on: iPhone Settings → Privacy &amp; Security → Location Services → <b>Safari Websites</b> → <b>While Using the App</b>, with <b>Precise Location</b> on. Then close Site Defects (swipe it away) and open it again.' : GEO.fix ? `On · last reading ±${Math.round(GEO.fix.acc)} m, ${fmtTime(GEO.fix.t)}. Each photo records where it was taken.` : 'Each photo records where it was taken. The iPhone asks for permission the first time you take a photo: choose <b>Allow While Using App</b>.'}</p></div>
       <div class="field"><label for="s-model">This iPhone’s model (optional)</label><input id="s-model" value="${esc(S.settings.deviceModel || '')}" placeholder="e.g. iPhone 17 Pro" maxlength="40"><span class="hint">Written into each new photo’s details as the camera model. iOS doesn’t tell web apps which iPhone they’re on, so photos say just “iPhone” unless this is filled in (photos from the iPhone camera or ＋ Library keep the model iOS recorded).</span></div>
@@ -3693,6 +3700,7 @@ async function openSettings() {
       $('#s-part', el).value = String(S.settings.partMB || 2048);
       $('#s-keep', el).value = String(S.settings.keepDays ?? 3);
       $('#s-rcv', el).onclick = () => { close(); loadReceipt(); };
+      $('#s-test', el).onclick = () => { close(); openTestMode(); };
       $('#s-save', el).onclick = async () => {
         const v = $('#s-ini', el).value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!v) { toast('Initials can’t be empty'); return; }
@@ -3891,9 +3899,10 @@ async function exportRun({ photos, copies, withXls }) {
   if (cur.length) parts.push(cur);
   const root = `${safeName(p.number)} Inspection`;
   const kind = withXls ? 'Export' : (copies === 'o' ? 'Unsorted' : copies === 'b' ? 'Photos' : 'Sorted');
-  const t0 = Date.now(), hhmm = pad(new Date(t0).getHours(), 2) + pad(new Date(t0).getMinutes(), 2);
+  // 1.14.0: the time in the name has seconds, so two exports in the same minute can't replace each other in Files
+  const t0 = Date.now(), hhmm = pad(new Date(t0).getHours(), 2) + pad(new Date(t0).getMinutes(), 2) + pad(new Date(t0).getSeconds(), 2);
   const jobs = parts.map((ph, i) => ({ photos: ph, idx: i, total: parts.length,
-    // 267180.00 2026-10-29 JJM Export 1215 part 1 of 3.zip
+    // 267180.00 2026-10-29 JJM Export 121503 part 1 of 3.zip
     name: `${safeName(p.number)} ${isoDay(t0)} ${safeName(S.settings.initials || 'XX')} ${kind} ${hhmm}${parts.length > 1 ? ` part ${i + 1} of ${parts.length}` : ''}.zip` }));
   const xcrc = xblob ? await crcOfBlob(xblob) : 0, now = Date.now();
   shareStep(jobs.map(j => ({ lazy: async () => {
@@ -4083,6 +4092,251 @@ async function loadDemo() {
   const parsed = parseWorkbook(templateWorkbook(), 'demo.xlsx');
   parsed.number = 'DEMO'; parsed.name = 'Demo project';
   confirmImport(parsed);
+}
+
+/* ================= Test mode (1.14.0) =================
+   For trying out the whole export → combine process with lots of data, on one iPhone.
+   - Test phones A–F each keep their data in their own storage, apart from the real projects and photos (which are
+     never touched). Switching reloads the app. A banner shows which test phone is open.
+   - "Fill with test data" builds the test project (the same on every test phone, so they combine as one project) and
+     records it as that phone's inspector: results, typed answers, windows and doors, notes, and photos made up on the
+     spot. Photos go through the normal steps: numbered and renamed, details and location written in, linked.
+   - Test phones cover overlapping components and disagree now and then, so combining has real conflicts to show.
+   - Everything else is real: Export, Did it save?, the Combine page, receipts, clean-up. */
+const TEST_NUMBER = '999999.00-TEST';
+const TEST_SITE = { lat: 36.0395, lon: -114.9817 };   // a made-up site (Henderson, NV)
+function testBandHTML() {
+  return TEST_PHONE ? `<div class="test-band" role="note"><span><b>TEST PHONE ${TEST_PHONE}</b> · test data only</span><button id="tb-open">Test mode</button></div>` : '';
+}
+document.addEventListener('click', e => { if (e.target.closest('#tb-open')) openTestMode(); if (e.target.closest('#w-gen')) testGenSheet(); });
+function switchTestPhone(letter) {
+  try { if (letter) localStorage.setItem('sd-test-phone', letter); else localStorage.removeItem('sd-test-phone'); } catch (_) { toast('Couldn’t switch: this browser blocks storage'); return; }
+  busy(letter ? `Opening test phone ${letter}…` : 'Back to the real phone…');
+  setTimeout(() => location.reload(), 200);
+}
+async function testPhonesInUse() {
+  try { return (await indexedDB.databases()).map(d => d.name).filter(n => /^site-defects-test-[A-F]$/.test(n || '')).map(n => n.slice(-1)).sort(); } catch (_) { return []; }
+}
+async function openTestMode() {
+  const used = await testPhonesInUse();
+  const btn = L => `<button class="btn ${L === TEST_PHONE ? '' : 'ghost'}" data-tp="${L}" ${L === TEST_PHONE ? 'disabled' : ''}>Phone ${L}${used.includes(L) ? ' ·&nbsp;has data' : ''}</button>`;
+  openSheet({
+    title: 'Test mode',
+    body: `${TEST_PHONE ? `<p>You’re on <b>test phone ${TEST_PHONE}</b> (inspector <b>${esc(S.settings.initials)}</b>). Everything here is test data, kept apart from your real projects and photos.</p>
+        <button class="btn" id="tm-gen" style="width:100%">Fill with test data…</button>
+        <button class="btn ghost" id="tm-real" style="width:100%;margin-top:8px">Back to the real phone</button>`
+      : `<p>Test mode lets you try the whole process (taking photos, exporting, combining on the PC, loading the receipt) with lots of made-up data. Your real projects and photos aren’t touched.</p>`}
+      <div class="section-h">Test phones</div>
+      <p class="note">Each test phone is a separate “inspector” with its own data (phone A is inspector TA, B is TB, and so on). To test combining several inspectors, fill two or three test phones, export each one, and combine all the ZIPs on the PC.</p>
+      <div class="tp-grid">${['A', 'B', 'C', 'D', 'E', 'F'].map(btn).join('')}</div>
+      ${TEST_PHONE ? `<div class="section-h">Start over</div><button class="btn red" id="tm-del" style="width:100%">Delete test phone ${TEST_PHONE}</button>
+        <p class="note">Deletes everything on test phone ${TEST_PHONE} and goes back to the real phone. ZIPs already saved to Files aren’t affected.</p>` : ''}
+      <div class="section-h">How to test</div>
+      <ol class="note tm-steps"><li>Open a test phone and tap <b>Fill with test data</b>.</li><li><b>Export</b> as usual and save the ZIPs to Files.</li><li>Repeat on another test phone or two (same numbers of units).</li><li>Move the ZIPs to the PC and run the <b>Combine</b> page.</li><li>Load the receipt on each test phone (<b>Menu → Load PC receipt</b>).</li><li>Fill again (for example as “Yesterday” or with changed results) and export and combine again, to test later batches.</li></ol>`,
+    foot: '<button class="btn ghost" data-close>Close</button>',
+    mount(el, close) {
+      el.querySelectorAll('[data-tp]').forEach(b => b.onclick = () => switchTestPhone(b.dataset.tp));
+      const g = $('#tm-gen', el); if (g) g.onclick = () => { close(); testGenSheet(); };
+      const r = $('#tm-real', el); if (r) r.onclick = () => switchTestPhone('');
+      const d = $('#tm-del', el); if (d) d.onclick = async () => {
+        if (!await confirmSheet(`Delete test phone ${TEST_PHONE}?`, `Everything on test phone ${TEST_PHONE} (test projects, results and photos) is deleted. Your real projects aren’t affected.`, 'Delete', true)) return;
+        busy('Deleting test phone…');
+        try { (await db()).close(); } catch (_) {}
+        await new Promise(res => { const q = indexedDB.deleteDatabase(DB_NAME); q.onsuccess = q.onerror = q.onblocked = () => res(); });
+        switchTestPhone('');
+      };
+    }
+  });
+}
+// small seeded random numbers, so every test phone agrees on the "true" answers and disagrees only where meant to
+function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+const pick = (r, arr) => arr[Math.floor(r() * arr.length)];
+function testWorkbook(nUnits, byBldg) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Project Number', TEST_NUMBER], ['Project Name', 'Test Condominiums'], ['Roofs', byBldg ? 'By building' : 'By unit']]), 'Project');
+  const units = [['Unit', 'Address', 'Schedule']];
+  for (let i = 0; i < nUnits; i++) { const label = String(Math.floor(i / 20) + 1) + pad(i % 20 + 1, 2); units.push([label, `${1200 + Math.floor(i / 20) * 10} Test Way #${label}`, i % 3 === 0 ? Math.floor(i / 3) + 1 : '']); }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(units), 'Units');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Component', 'Code', 'Defect', 'Answer', 'Choices', 'Units', 'Multiple'], ...DEMO_DEFECTS]), 'Defects');
+  const nB = Math.max(2, Math.ceil(nUnits / 20)), bl = [['Building', 'Description', 'Schedule']];
+  for (let b = 1; b <= nB; b++) bl.push(['Bldg ' + b, `${1200 + (b - 1) * 10} Test Way`, b]);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(byBldg ? bl : [['Building', 'Description', 'Schedule']]), 'Buildings');
+  return wb;
+}
+// Create (or reuse) the test project on this test phone, without the import screens.
+async function testProject(nUnits, byBldg) {
+  const have = S.projects.find(p => projNumKey(p.number) === projNumKey(TEST_NUMBER));
+  if (have) { if (S.project !== have) await activate(have); return have; }
+  const parsed = parseWorkbook(testWorkbook(nUnits, byBldg), 'test.xlsx');
+  const m = await mergeLists(null, { ...parsed, units: [...parsed.units, ...parsed.buildings] });
+  const p = { id: uid(), createdAt: Date.now(), state: {}, number: TEST_NUMBER, name: 'Test Condominiums', units: m.units, components: m.components, defects: m.defects,
+    addedComps: m.addedComps, orphanComps: m.orphanComps, roofBy: parsed.roofBy, bldgComps: parsed.roofBy === 'building' ? parsed.bldgComps : [], multiComps: parsed.multiComps || [], inst: {} };
+  await put('projects', { ...p, updatedAt: Date.now() });
+  S.projects = (await getAll('projects')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  await activate(S.projects.find(x => x.id === p.id));
+  return S.project;
+}
+// A made-up photo: a coloured card naming what it shows, with grain so the file size is like a real photo's.
+let noiseTile = null;
+function testPhotoFile(big, lines, hue, t, geo) {
+  const W = big ? 4032 : 1600, H = big ? 3024 : 1200;
+  if (!noiseTile) {
+    noiseTile = document.createElement('canvas'); noiseTile.width = noiseTile.height = 256;
+    const g = noiseTile.getContext('2d'), id = g.createImageData(256, 256);
+    for (let i = 0; i < id.data.length; i += 4) { const v = Math.random() * 255; id.data[i] = v; id.data[i + 1] = Math.random() * 255; id.data[i + 2] = v; id.data[i + 3] = 255; }
+    g.putImageData(id, 0, 0);
+  }
+  const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0, 0, W, H); gr.addColorStop(0, `hsl(${hue},45%,58%)`); gr.addColorStop(1, `hsl(${(hue + 40) % 360},40%,32%)`);
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  g.globalAlpha = big ? 0.42 : 0.16; g.fillStyle = g.createPattern(noiseTile, 'repeat');
+  g.save(); g.translate(Math.random() * 256, Math.random() * 256); g.fillRect(-256, -256, W + 512, H + 512); g.restore(); g.globalAlpha = 1;
+  const fs = Math.round(W / 22);
+  g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(W * 0.05, H * 0.08, W * 0.9, fs * (lines.length + 1.2));
+  g.fillStyle = '#fff'; g.font = `700 ${fs}px sans-serif`; g.textBaseline = 'top';
+  lines.forEach((l, i) => g.fillText(l, W * 0.08, H * 0.08 + fs * (0.5 + i * 1.05), W * 0.84));
+  const tc = drawTurned(c, 0, 0, W, H, 0, 480 / W);
+  return Promise.all([blobOf(c, big ? 0.92 : 0.85), blobOf(tc, 0.72)]).then(([b, tb]) => {
+    c.width = c.height = tc.width = tc.height = 0;
+    const f = new File([b], 'image.jpg', { type: 'image/jpeg' });   // named like an iPhone camera photo
+    f._thumb = tb; f._takenAt = t; f._geo = geo; f._lens = 'Test photo';
+    return f;
+  });
+}
+const TEST_NOTES = ['Hairline crack, approx. 1/16 in.', 'Owner reports leak during last rain.', 'Staining visible at lower corner.', 'Sealant failed; gap at head joint.', 'Could not access: furniture in the way.', 'Repaired previously by HOA?', 'Moisture meter reading elevated.', 'Same condition as adjacent unit.', 'See photos for close-up.', 'Measured with tape at center.'];
+const TEST_TEXT = ['AAMA HC40', 'AAMA LC25', 'AAMA R15', 'None found', 'Label painted over', 'Composite', 'Concrete topping', 'Wood', 'Vinyl membrane'];
+function testGenSheet() {
+  if (!TEST_PHONE) { alertSheet('Test mode only', 'Test data can only be added on a test phone, never alongside your real projects. Open Settings → Test mode first.'); return; }
+  const have = S.projects.find(p => projNumKey(p.number) === projNumKey(TEST_NUMBER));
+  const seg = (id, opts, cur) => `<div class="seg" id="${id}" role="radiogroup">${opts.map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${String(v) === String(cur)}">${l}</button>`).join('')}</div>`;
+  const prev = S.settings.testGen || { units: 100, photos: 250, big: 0, day: 0, bldg: 0, change: 0 };
+  openSheet({
+    title: `Fill test phone ${TEST_PHONE}`,
+    body: `<p class="note">Records the test project as inspector <b>${esc(S.settings.initials)}</b>. Use the same number of units and the same roof setting on every test phone, so they combine as one project.</p>
+      <div class="field"><label>Units${have ? ' (test project already made: ' + have.units.filter(u => !isBldg(u)).length + ' units)' : ''}</label>${seg('g-units', [[25, '25'], [100, '100'], [300, '300'], [600, '600']], have ? have.units.filter(u => !isBldg(u)).length : prev.units)}</div>
+      <div class="field"><label>Roofs</label>${seg('g-bldg', [[0, 'By unit'], [1, 'By building']], have ? (have.roofBy === 'building' ? 1 : 0) : prev.bldg)}</div>
+      <div class="field"><label>Photos to add</label>${seg('g-photos', [[50, '50'], [250, '250'], [1000, '1,000'], [2000, '2,000']], prev.photos)}</div>
+      <div class="field"><label>Photo files</label>${seg('g-big', [[0, 'Small (fast)'], [1, 'Real size (~5 MB)']], prev.big)}<span class="hint" id="g-est"></span></div>
+      <div class="field"><label>Taken</label>${seg('g-day', [[0, 'Today'], [1, 'Yesterday'], [2, '2 days ago'], [3, '3 days ago']], prev.day)}<span class="hint">Photo dates, names and times. For several site days, fill once per day.</span></div>
+      <div class="field"><label>Results already recorded</label>${seg('g-change', [[0, 'Keep'], [1, 'Change some']], prev.change)}<span class="hint">“Change some” changes about 1 in 10 recorded results and notes, to test the Change Log and later combines.</span></div>`,
+    foot: `<button class="btn ghost" data-close>Cancel</button><button class="btn" id="g-go">Fill</button>`,
+    mount(el, close) {
+      const val = id => +$(`#${id} [aria-checked="true"]`, el).dataset.v;
+      const est = () => { const n = val('g-photos'), big = val('g-big'); $('#g-est', el).textContent = `About ${mb(n * (big ? 5.5 : 0.35) * 1048576)} on this phone${big ? ', and a few minutes per 100 photos' : ''}.`; };
+      el.querySelectorAll('.seg').forEach(sg => sg.addEventListener('click', e => { const b = e.target.closest('[data-v]'); if (!b || (have && (sg.id === 'g-units' || sg.id === 'g-bldg'))) return; sg.querySelectorAll('[data-v]').forEach(x => x.setAttribute('aria-checked', x === b)); est(); }));
+      est();
+      $('#g-go', el).onclick = async () => {
+        const o = { units: val('g-units'), bldg: val('g-bldg'), photos: val('g-photos'), big: val('g-big'), day: val('g-day'), change: val('g-change') };
+        S.settings.testGen = o; await saveSettings(); close(); await testFill(o);
+      };
+    }
+  });
+}
+async function testFill(o) {
+  let stop = false;
+  const ov = document.createElement('div'); ov.className = 'gen-ov';
+  ov.innerHTML = `<div class="gen-box"><b>Filling test phone ${TEST_PHONE}</b><div class="gen-t">Setting up…</div><div class="gen-bar"><span></span></div><button class="btn ghost" id="gen-stop">Stop</button></div>`;
+  document.body.appendChild(ov);
+  $('#gen-stop', ov).onclick = () => { stop = true; $('#gen-stop', ov).textContent = 'Stopping…'; };
+  const show = (t, f) => { $('.gen-t', ov).textContent = t; $('.gen-bar span', ov).style.width = Math.round(Math.min(1, f) * 100) + '%'; };
+  let made = 0, recorded = 0, changed = 0;
+  const t0 = Date.now();
+  try {
+    const p = await testProject(o.units, !!o.bldg);
+    const k = TEST_PHONE.charCodeAt(0) - 65;                       // A = 0, B = 1, …
+    const me = rng(hashStr(TEST_PHONE + '|' + Date.now()));          // this phone, this run
+    const ini = S.settings.initials;
+    // components: each test phone covers two of every four (so each component is covered by two phones)
+    const unitComps = compsOfKind('unit'), bldgComps = compsOfKind('building');
+    const mine = c => { const i = p.components.indexOf(c) % 4; return i === k % 4 || i === (k + 1) % 4; };
+    const places = [...unitsInOrder('unit').map(u => ({ u, comps: unitComps.filter(mine) })), ...unitsInOrder('building').map(u => ({ u, comps: bldgComps }))];
+    // times: spread through the site day (8 am – 5 pm), or for "Today" from up to 9 hours ago until now (never before midnight)
+    const day = new Date(); day.setDate(day.getDate() - o.day); day.setHours(0, 0, 0, 0);
+    const start = o.day ? day.getTime() + 8 * 3600000 : Math.max(day.getTime() + 60000, Date.now() - 9 * 3600000);
+    const end = o.day ? day.getTime() + 17 * 3600000 : Date.now() - 5000;
+    let clock = start; const step = Math.max(1000, (end - start) / (o.photos + 2));
+    const tick = () => (clock = Math.min(end, clock + step * (0.5 + me())));
+    const obsTime = () => Math.round(start + me() * (end - start));
+    // 1. results, answers, notes (and windows / doors) — about 85% of units, at random
+    const todo = [];   // where photos can go: { unit, comp, item, defectId, weight }
+    const obsOut = [];
+    for (const { u, comps } of places) {
+      if (stop) break;
+      const unitR = rng(hashStr(TEST_NUMBER + '|' + u.label));
+      if (unitR() > 0.85 && me() > 0.3) continue;                     // not visited (yet)
+      for (const comp of comps) {
+        let items = [null];
+        if (isMulti(comp)) {
+          const key = itemsKey(u.label, comp), cnt = 1 + Math.floor(rng(hashStr(u.label + '|' + comp))() * 4);   // same on every phone
+          p.inst[key] = p.inst[key] || [];
+          for (let n = 1; n <= cnt; n++) if (!p.inst[key].some(x => x.n === n)) p.inst[key].push({ n, label: `${comp} ${n}`, at: Date.now() });
+          items = p.inst[key].map(x => x.n);
+        }
+        for (const n of items) {
+          for (const d0 of defectsFor(comp)) {
+            const id = n ? itemCid(d0.id, n) : d0.id, d = defectById(id);
+            const truth = rng(hashStr(TEST_NUMBER + '|' + u.label + '|' + id));
+            const o0 = getObs(u.label, id);
+            if (o0 && (o0.value || o0.ans) && !(o.change && me() < 0.1)) { if (o0.value === '1') todo.push({ unit: u.label, comp, item: n, defectId: id, weight: 0.3 }); continue; }
+            const ob = await ensureObs(u.label, id);
+            const before = ob.value + '|' + ob.ans;
+            if (isTyped(d)) {
+              const a = answerOf(d), r = truth();
+              if (r < 0.08) { ob.value = 'NA'; ob.ans = ''; }
+              else { ob.value = ''; ob.ans = a === 'choice' ? pick(truth, d.choices.filter(x => x !== 'Other')) : a === 'number' ? (d.units === 'count' ? String(Math.floor(truth() * 12)) : pick(truth, ['41 1/2', '36', '42.25', "3'-6\"", '4', '5 1/4'])) : pick(truth, TEST_TEXT); }
+            } else {
+              const r = truth();
+              ob.value = r < 0.2 ? '1' : r < 0.82 ? '0' : r < 0.95 ? 'NA' : 'NR'; ob.ans = '';
+            }
+            const other = () => { if (isTyped(d)) { ob.value = ''; ob.ans = answerOf(d) === 'choice' ? pick(me, d.choices.filter(x => x !== 'Other' && x !== ob.ans)) || 'Other' : answerOf(d) === 'number' ? String(Math.floor(me() * 50)) : pick(me, TEST_TEXT.filter(x => x !== ob.ans)); } else ob.value = pick(me, ['1', '0', 'NA', 'NR'].filter(x => x !== ob.value)); };
+            if (me() < 0.04) other();                                      // this inspector saw it differently (a conflict when combined)
+            if (o0 && (o0.value || o0.ans) && before === ob.value + '|' + ob.ans) other();   // "Change some": always a real change
+            if (me() < 0.15) ob.notes = pick(me, TEST_NOTES);
+            ob.updatedAt = obsTime(); ob.inspector = ini;
+            if (o0 && before !== ob.value + '|' + ob.ans) changed++;
+            obsOut.push(ob); recorded++;
+            todo.push({ unit: u.label, comp, item: n, defectId: id, weight: ob.value === '1' ? 3 : ob.value === '0' ? 0.6 : isTyped(d) ? 0.5 : 0.1 });
+          }
+        }
+        if (me() < 0.1) { const gid = generalId(comp), g = await ensureObs(u.label, gid); g.notes = pick(me, TEST_NOTES); g.updatedAt = obsTime(); g.inspector = ini; obsOut.push(g); }
+      }
+      if (obsOut.length > 400) { const d = await db(), t = d.transaction('obs', 'readwrite'); obsOut.splice(0).forEach(x => t.objectStore('obs').put(x)); await txDone(t); }
+      show(`Recording results… ${recorded.toLocaleString()}`, 0.05);
+    }
+    { const d = await db(), t = d.transaction('obs', 'readwrite'); obsOut.splice(0).forEach(x => t.objectStore('obs').put(x)); await txDone(t); }
+    await saveProject();
+    // 2. photos: mostly of defective conditions, some general, about 1 in 10 left unlinked, a few linked to two conditions
+    const total = todo.reduce((a, x) => a + x.weight, 0);
+    const choose = () => { let r = me() * total; for (const x of todo) { r -= x.weight; if (r <= 0) return x; } return todo[todo.length - 1]; };
+    const st = p.state, keep = { unit: st.unit, component: st.component, item: { ...(st.item || {}) } };
+    const order = [];
+    for (let i = 0; i < o.photos && todo.length; i++) order.push(choose());
+    const rank = new Map(places.map((x, i) => [x.u.label, i]));
+    order.sort((a, b) => rank.get(a.unit) - rank.get(b.unit) || p.components.indexOf(a.comp) - p.components.indexOf(b.comp));   // taken unit by unit, like on site
+    for (const x of order) {
+      if (stop) break;
+      st.unit = x.unit; st.component = x.comp; if (x.item) { st.item = st.item || {}; st.item[itemsKey(x.unit, x.comp)] = x.item; }
+      const d = defectById(x.defectId), r = me();
+      const kind = r < 0.1 ? 'unlinked' : r < 0.2 ? 'general' : 'linked';
+      const t = tick(), geo = { lat: TEST_SITE.lat + (rank.get(x.unit) % 20) * 0.00012 + (me() - 0.5) * 0.00004, lon: TEST_SITE.lon + Math.floor(rank.get(x.unit) / 20) * 0.0003 + (me() - 0.5) * 0.00004, alt: 520 + me() * 6, acc: 4 + me() * 20, t };
+      const f = await testPhotoFile(!!o.big, ['TEST PHOTO · ' + ini, `${kindWord(x.unit)} ${x.unit} · ${x.comp}${x.item ? ' ' + x.item : ''}`, kind === 'linked' ? `${d.code || ''} ${d.label}`.trim() : kind === 'general' ? 'General photo' : 'Not linked', new Date(t).toLocaleString()], (p.components.indexOf(x.comp) * 47) % 360, t, geo);
+      const linkTo = kind === 'linked' ? x.defectId : kind === 'general' ? itemCid(generalId(x.comp), x.item) : null;
+      const added = await addPhotos([f], linkTo, { quiet: true });
+      if (added[0] && kind === 'linked' && me() < 0.08) { const other = todo.find(y => y.unit === x.unit && y.comp === x.comp && y.defectId !== x.defectId); if (other) await linkPhoto(added[0], other.defectId, null); }
+      made += added.length;
+      const el = (Date.now() - t0) / 1000, rate = made / Math.max(1, el);
+      show(`Photo ${made.toLocaleString()} of ${order.length.toLocaleString()} · about ${Math.max(0, Math.round((order.length - made) / Math.max(rate, 0.01)))} s left`, 0.1 + 0.9 * made / order.length);
+      if (made % 25 === 0) await sleep(0);
+    }
+    st.unit = keep.unit || st.unit; st.component = keep.component || st.component; st.item = keep.item; await saveProject();
+  } catch (e) {
+    alertSheet('Test data stopped', String(e && e.message || e));
+  } finally {
+    ov.remove();
+    await activate(S.project); render(); setTimeout(crcIdle, 2000);
+  }
+  alertSheet(stop ? 'Stopped' : 'Test data added', `Test phone ${TEST_PHONE} (${S.settings.initials}): ${recorded.toLocaleString()} results recorded${changed ? `, ${changed} of them changed` : ''}, ${made.toLocaleString()} photos added in ${Math.round((Date.now() - t0) / 1000)} s.\n\nNext: Export (spreadsheet + photos), save the ZIPs to Files, then combine them on the PC.`);
 }
 
 /* ================= Boot ================= */

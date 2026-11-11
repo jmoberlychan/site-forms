@@ -92,7 +92,7 @@ Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page a
      5. Answer **Did it save?** It unlocks when you come back from the preview (or when the countdown ends). If the preview never appeared, tap **Download again**. The next part only starts after you answer.
 
      This works at any size. In a Home Screen app, iOS always shows this preview instead of saving straight to Downloads (Apple treats it as intended behaviour), so the share-button step can't be skipped. **Share…** opens the share sheet directly, but only for files up to 400 MB: the share sheet loads the whole file into memory, and bigger files make the app close.
-   - **ZIP names:** `<Project#> <YYYY-MM-DD> <Initials> <Export|Sorted|Unsorted|Photos> <HHMM>.zip`, plus `part 1 of 3` when an export is split, for example `267180.00 2026-10-29 JJM Export 1215 part 1 of 3.zip`.
+   - **ZIP names:** `<Project#> <YYYY-MM-DD> <Initials> <Export|Sorted|Unsorted|Photos> <HHMMSS>.zip`, plus `part 1 of 3` when an export is split, for example `267180.00 2026-10-29 JJM Export 121503 part 1 of 3.zip`. (From 1.14.0 the time has seconds, so two exports in the same minute can't replace each other in Files.)
    - **Did it save?** After each Download or Share, the app asks whether the file arrived. Only **Yes** marks those photos as exported. If you tap **Not sure**, they stay unexported and go into the next export.
    - A single video bigger than the ZIP part size goes into a ZIP part of its own.
    - **Checked files** (from 1.13.1): each file's checksum in the ZIP is worked out from the copy actually stored on the phone, and each photo is stored as one plain file, so the iPhone's Files app can always open the ZIP. (In 1.12.0–1.13.0 a ZIP could fail to open on the iPhone with "The operation couldn't be completed. Bad message".) **Settings → Photo check** shows how many stored photos have been checked. A ZIP from 1.12.0–1.13.0 that won't open on the iPhone can still be used on the PC with the Combine page, which doesn't need the checksums; or export those photos again with **All photos** selected.
@@ -148,6 +148,21 @@ If photos two or more days old still haven't been confirmed by a receipt, the ap
 From 1.11.1, in this order: **Projects**; **Defective conditions missing photos** (red when any condition marked 1 has no photo); the **Built-in camera** switch; **Add photos & videos from library**; **Edit lists**; **Get the Excel template**; **Load PC receipt**; **Export spreadsheet & photos**; **Settings & storage**.
 
 While the Menu or any other panel is open (unit and component lists, Unlinked, the link page, Settings and so on), the screen behind it doesn't scroll.
+
+## Test mode (from 1.14.0)
+
+For trying out the whole process (exporting, combining on the PC, loading the receipt) with lots of made-up data, on one iPhone. **Settings → Open test mode…**
+
+- **Test phones A–F:** each is a separate "inspector" (A is inspector TA, B is TB, and so on) with its own storage, completely apart from your real projects and photos, which aren't touched. Switching reloads the app. An orange **TEST PHONE** band shows at the top while one is open; **Test mode → Back to the real phone** returns to your real data.
+- **Fill with test data:** builds the test project `999999.00-TEST` (Test Condominiums) and records it as that test phone's inspector:
+  - **Units:** 25, 100, 300 or 600, with roofs by unit or by building. Use the same settings on every test phone, so they combine as one project.
+  - **Photos:** 50 to 2,000. **Small** files are quick (about 0.35 MB each); **Real size** files are about 5 MB each, like real photos, but take a few minutes per 100.
+  - **Taken:** today, yesterday, 2 or 3 days ago (photo names, dates and times), to test several site days.
+  - **Results already recorded:** **Keep**, or **Change some** (about 1 in 10) to test the Change Log and later combines.
+  - What it records: results for about 85% of units; typed answers; windows and doors (the same number on every test phone, so they match when combined); notes; and photos made up on the spot, showing what they're of. Photos go through the normal steps: numbered and renamed, location and details written in, linked (some unlinked, some general, a few linked to two conditions).
+  - Each test phone covers two of every four components, so every component is covered by two phones, and they disagree about 1 time in 25, so combining has real conflicts.
+- **Then do everything for real:** Export, save the ZIPs to Files, move them to the PC, run the Combine page, and load the receipt on each test phone (**Menu → Load PC receipt**). Fill again (for example as "Yesterday", or with changed results), export the new photos and combine again, to test later batches.
+- **Delete test phone X** removes that test phone's data and goes back to the real phone.
 
 ## Screen zoom
 
@@ -215,7 +230,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, `v1.10.4`, `v1.10.5`, `v1.10.6`, `v1.10.7`, `v1.10.8`, `v1.10.9`, `v1.10.10`, `v1.10.11`, `v1.10.12`, `v1.10.13`, `v1.10.14`, `v1.11.0`, `v1.11.1`, `v1.12.0`, `v1.12.1`, `v1.13.0`, `v1.13.1`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files (the icon files are named after the icon design from 1.10.12; from 1.10.14 there are 10: `icon-sgh-gradient-180/192/512.png`, `icon-sgh-charcoal/pattern/mint-180.png` and `icon-clip-gradient/charcoal/pattern/mint-180.png`) plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, `v1.10.4`, `v1.10.5`, `v1.10.6`, `v1.10.7`, `v1.10.8`, `v1.10.9`, `v1.10.10`, `v1.10.11`, `v1.10.12`, `v1.10.13`, `v1.10.14`, `v1.11.0`, `v1.11.1`, `v1.12.0`, `v1.12.1`, `v1.13.0`, `v1.13.1`, `v1.14.0`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files (the icon files are named after the icon design from 1.10.12; from 1.10.14 there are 10: `icon-sgh-gradient-180/192/512.png`, `icon-sgh-charcoal/pattern/mint-180.png` and `icon-clip-gradient/charcoal/pattern/mint-180.png`) plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
 
 To go back to a version, upload **all the files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 
