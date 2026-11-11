@@ -15,7 +15,7 @@ The app has to be served from a web address once, so Safari can install it. GitH
 
 Each inspector does steps 5–6 on their own phone with the same address.
 
-**App icon** (from 1.10.9): a black-and-white clipboard with a form grid and a camera. iPhones keep the icon a Home Screen app was installed with, so phones that already have the app keep the old icon. Don't delete the Home Screen app just to change its icon: that deletes every project and photo on the phone. Re-add it only once everything is exported and combined (or leave the old icon; the app itself updates normally).
+**App icon** (from 1.10.10): the SGH logo, in its reverse version (white with the gold diamond) on SGH charcoal, taken unaltered from the SGH Brand Guidelines with its clearspace. (1.10.9 briefly used a clipboard-and-camera icon.) iPhones keep the icon a Home Screen app was installed with, so phones that already have the app keep the old icon. Don't delete the Home Screen app just to change its icon: that deletes every project and photo on the phone. Re-add it only once everything is exported and combined (or leave the old icon; the app itself updates normally).
 
 Netlify Drop (app.netlify.com/drop) also works: drag this folder onto the page and you get an address immediately.
 
@@ -173,7 +173,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, `v1.10.4`, `v1.10.5`, `v1.10.6`, `v1.10.7`, `v1.10.8`, `v1.10.9`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, `v1.10.4`, `v1.10.5`, `v1.10.6`, `v1.10.7`, `v1.10.8`, `v1.10.9`, `v1.10.10`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
 
 To go back to a version, upload **all the files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 
