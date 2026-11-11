@@ -219,7 +219,7 @@ textarea.notes {
 #toast {
   position: fixed; left: 50%; bottom: calc(100px + var(--safe-b)); transform: translateX(-50%) translateY(20px);
   background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 10px; font-size: 15px; font-weight: 600;
-  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 60; max-width: 90vw; text-align: center;
+  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 250; max-width: 90vw; text-align: center;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .busy { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; padding: 20px; text-align: center; }
@@ -506,7 +506,7 @@ html.in-browser .tag { top: var(--bb-h, 32px); }
 .pv-info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pv-x { flex: 0 0 auto; min-width: 48px; min-height: 44px; border: 0; border-radius: 10px; background: rgba(255,255,255,.15); color: #fff; font-size: 20px; }
 .pv-stage { flex: 1; min-height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-.pv-img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; transform-origin: center center; will-change: transform; }
+.pv-img { width: 100%; height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; transform-origin: center center; will-change: transform; }
 video.pv-img { touch-action: auto; }
 .pv-bot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px 14px; }
 .pv-nav { min-width: 64px; min-height: 52px; border: 0; border-radius: 12px; background: rgba(255,255,255,.15); color: #fff; font-size: 30px; }
@@ -538,3 +538,34 @@ video.pv-img { touch-action: auto; }
 .icon-pick button[aria-pressed=true] { border-color: var(--focus); box-shadow: 0 0 0 2px var(--focus); }
 .icon-pick img { width: 96px; height: 96px; border-radius: 21px; display: block; }
 .icon-pick-h { margin: 14px 0 0; font-size: 15px; }
+
+/* 1.11.0: full-screen preview — photo strip along the bottom, Delete for a just-taken photo */
+.pv-stage { will-change: transform; }
+.pv-acts { display: flex; gap: 8px; flex: 0 0 auto; align-items: center; }
+.pv-del { min-height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: rgba(255,255,255,.15); color: #ff6b61; font-size: 16px; font-weight: 700; }
+.pv-del.arm { background: #d92d20; color: #fff; }
+.pv-film { display: flex; gap: 4px; overflow-x: auto; padding: 8px 12px 0; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex: 0 0 auto; }
+.pv-film::-webkit-scrollbar { display: none; }
+.pv-film[hidden] { display: none; }
+.pv-f { flex: 0 0 auto; width: 52px; height: 52px; padding: 0; border: 2px solid transparent; border-radius: 7px; overflow: hidden; background: #222; opacity: .55; position: relative; }
+.pv-f img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+.pv-f.cur { border-color: #fff; opacity: 1; }
+.pv-f.picked::after { content: "✓"; position: absolute; right: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--focus); color: #fff; font-size: 11px; line-height: 16px; text-align: center; }
+/* 1.11.0: the link page — photos stay at the top, conditions scroll underneath */
+.sheet-body.ls { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; min-height: 0; }
+.ls .ls-photos { flex: 0 0 auto; max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.ls .ls-photos .thumbs { margin-top: 0; }
+.ls .ls-bar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 15px; min-height: 40px; }
+.ls .ls-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.ls .ls-count b { color: var(--ink); }
+.ls .ls-bar .acts { display: flex; gap: 6px; flex: 0 0 auto; }
+.ls .ls-conds { flex: 1 1 auto; min-height: 150px; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 12px; }
+.ls-multi { align-items: flex-start; margin: 10px 0 2px; }
+.ls-multi .hint { display: block; font-weight: 400; color: var(--muted); font-size: 14px; }
+.ls-multi input { flex: 0 0 auto; margin-top: 1px; }
+.thumb .lk { position: absolute; left: 4px; top: 4px; background: var(--r0); color: #fff; font-size: 11px; font-weight: 700; padding: 1px 5px; border-radius: 4px; }
+.tsz-m .thumbs .lk, .tsz-l .thumbs .lk { font-size: 13px; }
+.lchip { display: inline-block; border-radius: 6px; padding: 1px 6px; font-size: 13px; font-weight: 700; background: var(--r0); color: #fff; white-space: nowrap; }
+.mini.on { background: var(--r0); color: #fff; border-color: var(--r0); }
+.ls .thumb .chk { top: auto; bottom: 4px; }
+.ls .thumb:not(.sel) img { opacity: .5; }
