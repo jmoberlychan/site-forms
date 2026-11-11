@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.12.1';
+const APP_VERSION = '1.13.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -593,6 +593,227 @@ function confirmImport(parsed) {
   });
 }
 
+/* ================= Location + photo metadata (1.13.0) =================
+   Every photo gets its details written into the JPEG file itself (EXIF), so they travel with the photo wherever it's
+   copied: where it was taken (GPS latitude, longitude, altitude, accuracy), when (date, time, time zone), the device,
+   and what it shows (project, unit or building, component, inspector, photo name).
+   - Location comes from the iPhone's Location Services while the app is taking photos. iOS removes location from
+     photos handed to web apps, so the app adds its own reading, taken at the moment of the shot.
+   - A photo that already has its own details (the iPhone camera, or ＋ Library) keeps them; the app only adds what's
+     missing, plus its own description. A photo that had to be re-saved (Settings → Photo size) keeps its original details.
+   - Videos can't carry these details here; their location is in the Photo Log. */
+const GEO = { watch: null, fix: null, err: '', stopT: null, waiters: [], told: false };
+const GEO_FRESH_MS = 120000;   // a reading counts for a photo taken within 2 minutes of it
+function geoStart() {
+  if (!navigator.geolocation) { GEO.err = 'unsupported'; return; }
+  clearTimeout(GEO.stopT);
+  if (GEO.watch != null) return;
+  try {
+    GEO.watch = navigator.geolocation.watchPosition(onGeo, onGeoErr, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  } catch (e) { GEO.err = 'unavailable'; }
+}
+function geoStopSoon(ms = 120000) {
+  clearTimeout(GEO.stopT);
+  GEO.stopT = setTimeout(() => { if (GEO.watch != null) { try { navigator.geolocation.clearWatch(GEO.watch); } catch (_) {} GEO.watch = null; } }, ms);
+}
+function onGeo(pos) {
+  const c = pos.coords;
+  GEO.fix = { lat: c.latitude, lon: c.longitude, alt: c.altitude, acc: c.accuracy, altAcc: c.altitudeAccuracy, t: pos.timestamp || Date.now() };
+  GEO.err = '';
+  GEO.waiters.splice(0).forEach(f => f());
+  if (CAM.el) camUpdate();
+}
+function onGeoErr(e) {
+  GEO.err = e && e.code === 1 ? 'denied' : 'unavailable';
+  if (GEO.err === 'denied') {
+    GEO.waiters.splice(0).forEach(f => f());
+    if (GEO.watch != null) { try { navigator.geolocation.clearWatch(GEO.watch); } catch (_) {} GEO.watch = null; }
+    if (!GEO.told) { GEO.told = true; toast('Location is off — photos won’t record where they were taken (see Settings)'); }
+  }
+  if (CAM.el) camUpdate();
+}
+const geoFreshFor = t => GEO.fix && Math.abs(GEO.fix.t - t) < GEO_FRESH_MS ? GEO.fix : null;
+// The location for a photo taken at time t: the latest reading if it's recent, otherwise wait up to waitMs for one.
+async function geoFor(t, waitMs) {
+  const f = geoFreshFor(t); if (f) return f;
+  if (GEO.err === 'denied' || GEO.err === 'unsupported' || !waitMs) return null;
+  if (Date.now() - (GEO.missAt || 0) < 60000) return null;   // no reading came last time (indoors?): don't hold up photos again for a minute
+  geoStart();
+  await Promise.race([new Promise(r => GEO.waiters.push(r)), sleep(waitMs)]);
+  const got = geoFreshFor(t); if (!got) GEO.missAt = Date.now();
+  return got;
+}
+function geoStatusHTML() {
+  if (GEO.err === 'denied') return '<span class="geo off">Location off</span>';
+  const f = GEO.fix && Date.now() - GEO.fix.t < 30000 ? GEO.fix : null;
+  return f ? `<span class="geo on">GPS ±${Math.max(1, Math.round(f.acc))} m</span>` : '<span class="geo wait">Finding location…</span>';
+}
+const iosVersion = () => { const m = /OS (\d+)[_.](\d+)(?:[_.](\d+))? like Mac OS X/.exec(navigator.userAgent || ''); return m ? m.slice(1).filter(Boolean).join('.') : ''; };
+const asciiOnly = t => String(t || '').normalize('NFKD').replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, '-').replace(/×/g, 'x').replace(/[^\x20-\x7E]/g, '');
+
+/* ---------- a small EXIF (TIFF) reader and writer: keeps every existing entry exactly as it was ---------- */
+const TSIZE = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
+const PTR = { exif: 34665, gps: 34853, interop: 40965 };
+function exifRead(u8) {
+  if (u8.length < 8) return null;
+  const le = u8[0] === 0x49, dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const g16 = o => dv.getUint16(o, le), g32 = o => dv.getUint32(o, le);
+  const readIFD = off => {
+    const m = new Map(); if (!off || off + 2 > u8.length) return m;
+    const n = g16(off);
+    for (let i = 0; i < n; i++) {
+      const e = off + 2 + i * 12; if (e + 12 > u8.length) break;
+      const tag = g16(e), type = g16(e + 2), count = g32(e + 4), sz = TSIZE[type] * count;
+      if (!TSIZE[type] || sz > 1e6) continue;
+      const vo = sz <= 4 ? e + 8 : g32(e + 8); if (vo + sz > u8.length) continue;
+      m.set(tag, { type, count, bytes: u8.slice(vo, vo + sz) });
+    }
+    return m;
+  };
+  const ptr = (m, tag) => { const x = m.get(tag); if (!x) return 0; m.delete(tag); return new DataView(x.bytes.buffer).getUint32(0, le); };
+  const ifd0 = readIFD(g32(4));
+  const exif = readIFD(ptr(ifd0, PTR.exif)), gps = readIFD(ptr(ifd0, PTR.gps)), interop = readIFD(ptr(exif, PTR.interop));
+  return { le, ifd0, exif, gps, interop };
+}
+function exifWrite(x) {
+  const { le } = x, order = ['ifd0', 'exif', 'gps', 'interop'];
+  const enc32 = v => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, le); return b; };
+  for (const k of order) x[k].delete(PTR[k] || -1);
+  const used = order.filter(k => k === 'ifd0' || x[k].size);
+  const has = k => used.includes(k);
+  // pointer entries first get a placeholder, so every block's size is known before the offsets are worked out
+  if (has('exif')) x.ifd0.set(PTR.exif, { type: 4, count: 1, bytes: enc32(0) });
+  if (has('gps')) x.ifd0.set(PTR.gps, { type: 4, count: 1, bytes: enc32(0) });
+  if (has('interop')) x.exif.set(PTR.interop, { type: 4, count: 1, bytes: enc32(0) });
+  const sizeOf = m => { let d = 0; for (const e of m.values()) if (e.bytes.length > 4) d += e.bytes.length + (e.bytes.length & 1); return 2 + m.size * 12 + 4 + d; };
+  const off = {}; let at = 8;
+  for (const k of used) { off[k] = at; at += sizeOf(x[k]); }
+  if (has('exif')) x.ifd0.get(PTR.exif).bytes = enc32(off.exif);
+  if (has('gps')) x.ifd0.get(PTR.gps).bytes = enc32(off.gps);
+  if (has('interop')) x.exif.get(PTR.interop).bytes = enc32(off.interop);
+  const out = new Uint8Array(at), dv = new DataView(out.buffer);
+  out[0] = out[1] = le ? 0x49 : 0x4D; dv.setUint16(2, 42, le); dv.setUint32(4, 8, le);
+  for (const k of used) {
+    const m = x[k], base = off[k], tags = [...m.keys()].sort((a, b) => a - b);
+    let data = base + 2 + tags.length * 12 + 4;
+    dv.setUint16(base, tags.length, le);
+    tags.forEach((tag, i) => {
+      const e = m.get(tag), p = base + 2 + i * 12;
+      dv.setUint16(p, tag, le); dv.setUint16(p + 2, e.type, le); dv.setUint32(p + 4, e.count, le);
+      if (e.bytes.length <= 4) out.set(e.bytes, p + 8);
+      else { dv.setUint32(p + 8, data, le); out.set(e.bytes, data); data += e.bytes.length + (e.bytes.length & 1); }
+    });
+    dv.setUint32(base + 2 + tags.length * 12, 0, le);   // no further IFDs (the embedded thumbnail, if any, is dropped)
+  }
+  return out;
+}
+// value encoders, in the file's byte order
+function exifVal(le) {
+  const num = (type, size, set) => arr => { const b = new Uint8Array(arr.length * size), dv = new DataView(b.buffer); arr.forEach((v, i) => set(dv, i * size, v)); return { type, count: arr.length, bytes: b }; };
+  return {
+    ascii: t => { const a = asciiOnly(t), b = new Uint8Array(a.length + 1); for (let i = 0; i < a.length; i++) b[i] = a.charCodeAt(i); return { type: 2, count: b.length, bytes: b }; },
+    byte: num(1, 1, (dv, o, v) => dv.setUint8(o, v)),
+    short: num(3, 2, (dv, o, v) => dv.setUint16(o, v, le)),
+    long: num(4, 4, (dv, o, v) => dv.setUint32(o, v, le)),
+    rat: num(5, 8, (dv, o, v) => { dv.setUint32(o, v[0], le); dv.setUint32(o + 4, v[1], le); }),
+    undef: bytes => ({ type: 7, count: bytes.length, bytes: Uint8Array.from(bytes) }),
+  };
+}
+const exifStr = e => e ? new TextDecoder().decode(e.bytes).replace(/\0+$/, '').trim() : '';
+const exifTime = t => { const d = new Date(t); return `${d.getFullYear()}:${pad(d.getMonth() + 1, 2)}:${pad(d.getDate(), 2)} ${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}`; };
+const exifOffset = t => { const m = -new Date(t).getTimezoneOffset(), a = Math.abs(m); return (m < 0 ? '-' : '+') + pad(Math.floor(a / 60), 2) + ':' + pad(a % 60, 2); };
+// "2026:11:10 14:03:22" (+ "-08:00") → ms
+function exifWhen(dt, offs) {
+  const m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(dt || ''); if (!m) return null;
+  if (/^[+-]\d\d:\d\d$/.test(offs || '')) { const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${offs}`); return isNaN(t) ? null : t; }
+  return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+}
+const dms = v => { v = Math.abs(v); const d = Math.floor(v), mf = (v - d) * 60, m = Math.floor(mf), sec = Math.round((mf - m) * 60 * 10000); return [[d, 1], [m, 1], [sec, 10000]]; };
+const ratOf = v => [Math.round(v * 1000), 1000];
+// Find the JPEG's EXIF block and picture size. Reads only the start of the file.
+async function jpegHead(blob) {
+  const u8 = new Uint8Array(await blob.slice(0, 256 * 1024).arrayBuffer());
+  if (u8[0] !== 0xFF || u8[1] !== 0xD8) return null;
+  const r = { exif: null, cut: [2, 2], w: 0, h: 0 };
+  for (let pos = 2; pos + 4 < u8.length;) {
+    if (u8[pos] !== 0xFF) break;
+    const mk = u8[pos + 1]; if (mk === 0xFF) { pos++; continue; }
+    if (mk === 0xD8 || (mk >= 0xD0 && mk <= 0xD7) || mk === 0x01) { pos += 2; continue; }
+    const len = (u8[pos + 2] << 8) | u8[pos + 3];
+    if (mk === 0xE1 && !r.exif && u8[pos + 4] === 0x45 && u8[pos + 5] === 0x78 && u8[pos + 6] === 0x69 && u8[pos + 7] === 0x66 && u8[pos + 8] === 0 && u8[pos + 9] === 0) {
+      r.exif = exifRead(u8.slice(pos + 10, pos + 2 + len)); r.cut = [pos, pos + 2 + len];
+    }
+    if ((mk >= 0xC0 && mk <= 0xC3) || (mk >= 0xC5 && mk <= 0xC7) || (mk >= 0xC9 && mk <= 0xCB) || (mk >= 0xCD && mk <= 0xCF)) {
+      r.h = (u8[pos + 5] << 8) | u8[pos + 6]; r.w = (u8[pos + 7] << 8) | u8[pos + 8]; break;
+    }
+    if (mk === 0xDA) break;
+    pos += 2 + len;
+  }
+  return r;
+}
+// Read a picture's own details (for ＋ Library photos: when it was really taken, and whether it already has a location).
+async function photoFacts(f) {
+  try {
+    const h = await jpegHead(f); const x = h && h.exif; if (!x) return {};
+    return { shotAt: exifWhen(exifStr(x.exif.get(36867)), exifStr(x.exif.get(36881))), hasGPS: x.gps.has(2) && x.gps.has(4) };
+  } catch (_) { return {}; }
+}
+/* Write the details into the JPEG `out`. `src` is the file the photo came from (the same blob when it wasn't re-saved);
+   its details are kept, and the app's are added. info: { takenAt, geo, upright, lens, zoom, desc, artist } */
+async function stampPhoto(out, src, info) {
+  const ho = await jpegHead(out); if (!ho) return { blob: out };
+  const hs = src && src !== out ? await jpegHead(src).catch(() => null) : ho;
+  const x = (hs && hs.exif) || { le: false, ifd0: new Map(), exif: new Map(), gps: new Map(), interop: new Map() };
+  const V = exifVal(x.le), set = (m, tag, v) => m.set(tag, v), miss = (m, tag, v) => { if (!m.has(tag)) m.set(tag, v); };
+  const t = info.takenAt;
+  // device
+  miss(x.ifd0, 271, V.ascii('Apple'));
+  miss(x.ifd0, 272, V.ascii(S.settings.deviceModel || 'iPhone'));
+  set(x.ifd0, 305, V.ascii(`Site Defects ${APP_VERSION}${iosVersion() ? ' (iOS ' + iosVersion() + ')' : ''}`));
+  // what it shows and who took it
+  if (info.desc) set(x.ifd0, 270, V.ascii(info.desc));
+  if (info.artist) set(x.ifd0, 315, V.ascii(info.artist));
+  // when
+  miss(x.ifd0, 306, V.ascii(exifTime(t)));
+  if (!x.exif.has(36867)) {   // the photo has no time of its own: the app's (with its time zone and milliseconds)
+    set(x.exif, 36867, V.ascii(exifTime(t))); miss(x.exif, 36868, V.ascii(exifTime(t)));
+    set(x.exif, 36880, V.ascii(exifOffset(t))); set(x.exif, 36881, V.ascii(exifOffset(t))); set(x.exif, 36882, V.ascii(exifOffset(t)));
+    set(x.exif, 37521, V.ascii(pad(new Date(t).getMilliseconds(), 3))); set(x.exif, 37522, V.ascii(pad(new Date(t).getMilliseconds(), 3)));
+  }
+  miss(x.exif, 36864, V.undef([0x30, 0x32, 0x33, 0x32]));   // EXIF 2.32
+  miss(x.exif, 40961, V.short([1]));                          // sRGB
+  // the picture as it is now
+  if (info.upright) set(x.ifd0, 274, V.short([1]));          // re-saved photos are already turned the right way up
+  if (ho.w && ho.h) { set(x.exif, 40962, V.long([ho.w])); set(x.exif, 40963, V.long([ho.h])); }
+  if (info.lens) { miss(x.exif, 42035, V.ascii('Apple')); miss(x.exif, 42036, V.ascii(info.lens + (info.zoom ? ' at ' + fmtZoom(info.zoom).replace('×', 'x') + ' zoom' : ''))); }
+  // where
+  const g = info.geo;
+  if (g && !(x.gps.has(2) && x.gps.has(4))) {
+    const d = new Date(g.t);
+    x.gps = new Map();
+    set(x.gps, 0, V.byte([2, 3, 0, 0]));
+    set(x.gps, 1, V.ascii(g.lat < 0 ? 'S' : 'N')); set(x.gps, 2, V.rat(dms(g.lat)));
+    set(x.gps, 3, V.ascii(g.lon < 0 ? 'W' : 'E')); set(x.gps, 4, V.rat(dms(g.lon)));
+    if (g.alt != null && isFinite(g.alt)) { set(x.gps, 5, V.byte([g.alt < 0 ? 1 : 0])); set(x.gps, 6, V.rat([ratOf(Math.abs(g.alt))])); }
+    set(x.gps, 7, V.rat([[d.getUTCHours(), 1], [d.getUTCMinutes(), 1], [d.getUTCSeconds() * 1000 + d.getUTCMilliseconds(), 1000]]));
+    set(x.gps, 18, V.ascii('WGS-84'));
+    set(x.gps, 29, V.ascii(`${d.getUTCFullYear()}:${pad(d.getUTCMonth() + 1, 2)}:${pad(d.getUTCDate(), 2)}`));
+    if (g.acc != null && isFinite(g.acc)) set(x.gps, 31, V.rat([ratOf(g.acc)]));
+  }
+  let tiff = exifWrite(x);
+  if (tiff.length > 65000) { x.exif.delete(37500); tiff = exifWrite(x); }   // too big for one block: drop the camera's private notes
+  if (tiff.length > 65000) return { blob: out };
+  const app1 = new Uint8Array(10 + tiff.length);
+  app1.set([0xFF, 0xE1, ((tiff.length + 8) >> 8) & 255, (tiff.length + 8) & 255, 0x45, 0x78, 0x69, 0x66, 0, 0]); app1.set(tiff, 10);
+  const [c0, c1] = ho.cut;
+  const blob = new Blob([out.slice(0, 2), app1, out.slice(2, c0), out.slice(c1)], { type: 'image/jpeg' });
+  return { blob, model: exifStr(x.ifd0.get(272)), shotAt: exifWhen(exifStr(x.exif.get(36867)), exifStr(x.exif.get(36881))) };
+}
+function photoDesc(unit, component, initials) {
+  const p = S.project, it = curItem();
+  return [p.number + (p.name ? ' ' + p.name : ''), kindWord(unit) + ' ' + unit, component + (it && component === ctx().component ? ' - ' + itemLabel(unit, component, it) : ''), 'Inspector ' + initials].join(' | ');
+}
+
 /* ================= Photos ================= */
 function loadImg(blob) {
   return new Promise((res, rej) => {
@@ -639,18 +860,19 @@ async function nextSeq(initials, dk) {
   return n;
 }
 let persistAsked = false;
-async function addPhotos(files, linkDefectId) {
+async function addPhotos(files, linkDefectId, opts = {}) {
   const { unit, component } = ctx();
   const initials = S.settings.initials;
   const added = [], failed = [];
   const list = [...files];
+  let geoWait = [...files].some(f => f._takenAt) ? 1500 : 4000;   // wait for a location reading at most once per batch (briefly in the built-in camera)
   for (let i = 0; i < list.length; i++) {
     const f = list[i];
     if (list.length > 1) busy(`Saving photo ${i + 1} of ${list.length}…`);
     try {
       const vid = isVideoFile(f);
       const ext = vid ? videoExt(f) : 'jpg';
-      let full = f, thumb;
+      let full = f, thumb, reSaved = false;
       if (vid) {
         if (list.length === 1) busy('Saving video…');
         thumb = await videoThumb(f); // videos are kept exactly as recorded
@@ -659,12 +881,25 @@ async function addPhotos(files, linkDefectId) {
       } else {
         const img = await loadImg(f);
         const isJpeg = /^image\/jpe?g$/i.test(f.type || '') || (!f.type && /\.jpe?g$/i.test(f.name || ''));
-        if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) full = await canvasBlob(img, S.settings.photoMax, 0.88);
-        else if (!isJpeg) full = await canvasBlob(img, 1e9, 0.92);   // PNG / HEIC etc.: a real JPEG at full size, matching the .jpg name
+        if (S.settings.photoMax && Math.max(img.naturalWidth, img.naturalHeight) > S.settings.photoMax) { full = await canvasBlob(img, S.settings.photoMax, 0.88); reSaved = true; }
+        else if (!isJpeg) { full = await canvasBlob(img, 1e9, 0.92); reSaved = true; }   // PNG / HEIC etc.: a real JPEG at full size, matching the .jpg name
         thumb = await canvasBlob(img, 480, 0.72);   // 1.10.6: 480 px (was 320) so Large thumbnails stay sharp
         img.removeAttribute('src');   // 1.10.7: drop the decoded picture now rather than whenever Safari gets round to it
       }
-      const takenAt = Date.now();
+      const takenAt = f._takenAt || Date.now();   // 1.13.0: built-in camera photos keep the moment the shutter was pressed
+      // 1.13.0: where it was taken. ＋ Library photos only get today's location if they were taken in the last 10 minutes
+      // (otherwise they may have been taken somewhere else); a photo that already has its own location keeps it.
+      let geo = f._geo || null, facts = {};
+      if (opts.library) facts = await photoFacts(f);
+      const fresh = !opts.library || (facts.shotAt && Math.abs(Date.now() - facts.shotAt) < 10 * 60000);
+      // (a library photo from the last 10 minutes gets the current location: the inspector is still on site)
+      if (!geo && fresh && !facts.hasGPS) { geo = await geoFor(opts.library ? Date.now() : takenAt, geoWait); if (!geo) geoWait = 0; }
+      if (!vid) {
+        try {
+          const st = await stampPhoto(full, reSaved ? f : full, { takenAt: facts.shotAt || takenAt, geo, upright: reSaved || !!f._thumb, lens: f._lens, zoom: f._zoom, desc: photoDesc(unit, component, initials), artist: initials });
+          full = st.blob; if (st.model) facts.model = st.model; if (st.shotAt) facts.shotAt = st.shotAt;
+        } catch (e) { /* the photo is kept without the extra details rather than lost */ }
+      }
       const dk = dateKey(takenAt);
       const seq = await nextSeq(initials, dk);
       const name = `${safeName(S.project.number)} ${isoDay(takenAt)} ${safeName(initials)} ${pad(seq, 4)}.${ext}`;   // 267180.00 2026-10-29 JJM 0001.jpg
@@ -676,6 +911,9 @@ async function addPhotos(files, linkDefectId) {
       const taken = new Set(S.photos.map(origNameOf));
       if (taken.has(orig)) { const base = orig.replace(/\.\w+$/, ''); let k = 2; while (taken.has(`${base}_${k}.${ext}`)) k++; orig = `${base}_${k}.${ext}`; }
       const meta = { id: uid(), projectId: S.project.id, kind: vid ? 'video' : 'photo', ext, name, origName: orig, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exp: { r: null, o: null } };
+      if (geo) meta.geo = { lat: geo.lat, lon: geo.lon, alt: geo.alt, acc: geo.acc, t: geo.t };
+      if (facts.shotAt && Math.abs(facts.shotAt - takenAt) > 60000) meta.shotAt = facts.shotAt;   // a library photo taken earlier
+      meta.device = facts.model || S.settings.deviceModel || 'iPhone';
       // checksum for the ZIP. 1.12.0: built-in camera photos skip it here (it slowed every shot); it's worked out in the
       // background after the camera closes (crcIdle), or at export at the latest.
       if (!vid && !f._thumb) { meta.crc = await crcOfBlob(full); meta.crcSize = full.size; }
@@ -690,6 +928,7 @@ async function addPhotos(files, linkDefectId) {
   busy(null);
   if (failed.length) rescueFiles(failed);
   if (!persistAsked && navigator.storage && navigator.storage.persist) { persistAsked = true; navigator.storage.persist().catch(() => {}); }
+  if (!CAM.el) geoStopSoon();
   checkStorage();
   return added;
 }
@@ -886,7 +1125,7 @@ function capture(defectId, continuing) {
   if (storageBlocked()) return;
   if (!continuing || !batch) batch = { defectId: defectId || null, photos: [] };
   if (S.settings.camera === 'builtin' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) { openCamera(); return; }
-  dropWarm();
+  dropWarm(); geoStart();
   pendingCapture = { defectId: batch.defectId };
   const inp = $('#cam-input'); inp.value = ''; watchPicker(inp); inp.click();
 }
@@ -952,14 +1191,14 @@ function batchSheet() {
 }
 function fromLibrary() {
   if (!requireContext()) return;
-  pendingCapture = { defectId: null, library: true };
+  pendingCapture = { defectId: null, library: true }; geoStart();
   const inp = $('#lib-input'); inp.value = ''; watchPicker(inp); inp.click();
 }
 async function onFilesChosen(e) {
   const files = e.target.files; if (!files || !files.length) return;
   // the picker can report late (after the cancel fallback cleared it): fall back to the last request
   const pc = pendingCapture || lastCapture || { defectId: null }; pendingCapture = null;
-  const added = await addPhotos(files, pc.defectId);
+  const added = await addPhotos(files, pc.defectId, { library: !!pc.library });
   if (!added.length) return;
   render();
   if (pc.library) { toast(added.length + ' photo' + (added.length > 1 ? 's' : '') + ' added to unlinked'); openTray(); return; }
@@ -1057,6 +1296,7 @@ function openCamera() {
     if (CAM.lensId && !(CAM.virt && CAM.lensId === CAM.virt.id)) { const w = lensOfKind('wide'); if (w) CAM.lensId = w.id; }
   }
   CAM.fixLens = true; CAM.pending = 0; CAM.popOpen = null;
+  geoStart();   // 1.13.0: location readings while the camera is open
   const el = document.createElement('div'); el.className = 'cam'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Camera');
   el.innerHTML = `
     <div class="cam-top">
@@ -1601,7 +1841,7 @@ function unlockFocus() {
 function camCtxHTML() {
   const { unit, component } = ctx(); const d = batch && batch.defectId ? condById(batch.defectId) : null;
   const it = curItem();
-  return `<b>${esc(unit)}</b> · ${esc(component)}${it ? ' · ' + esc(itemLabel(unit, component, it)) : ''}${d ? `<br><span>${esc(d.label)}</span>` : ''}`;
+  return `<b>${esc(unit)}</b> · ${esc(component)}${it ? ' · ' + esc(itemLabel(unit, component, it)) : ''}${d ? `<br><span>${esc(d.label)}</span>` : ''}<br>${geoStatusHTML()}`;
 }
 function camUpdate() {
   if (!CAM.el) return;
@@ -1767,6 +2007,7 @@ async function snapPhoto() {
   const night = CAM.mode === 'photo' ? (S.settings.night || 0) : 0;
   const useFlash = flashMode() === 'flash' && !!(CAM.caps && CAM.caps.torch);
   const r = captureRotation();                                      // phone held sideways → landscape photo
+  const shotAt = Date.now(), shotGeo = geoFreshFor(shotAt), shotZoom = CAM.zoom, shotLens = CAM.label || '';
   let out = null;
   try {
     if (useFlash) { CAM.flashing = true; applyFlash(); await sleep(FLASH_SETTLE_MS); if (!CAM.el || !CAM.track) return; }
@@ -1797,7 +2038,8 @@ async function snapPhoto() {
   const fileP = blobOf(out, 0.92).then(fb => { out.width = out.height = 0; return fb; });
   await camSave(Promise.all([fileP, thumbP]).then(([fb, tb]) => {
     if (!fb) throw new Error('Out of memory for photos — close other apps');
-    const f = new File([fb], 'capture.jpg', { type: 'image/jpeg' }); if (tb) f._thumb = tb; return f;
+    const f = new File([fb], 'capture.jpg', { type: 'image/jpeg' }); if (tb) f._thumb = tb;
+    f._takenAt = shotAt; f._geo = shotGeo; f._zoom = shotZoom; f._lens = shotLens; return f;
   }), true);
 }
 /* ---------- 1.12.0: Night mode ----------
@@ -1941,7 +2183,7 @@ function toggleRecord() {
     const type = (rec.mimeType || mime || 'video/mp4').split(';')[0];
     const blob = new Blob(CAM.chunks, { type }); CAM.chunks = [];
     if (CAM.el) camUpdate();
-    if (blob.size) await camSave(new File([blob], 'video.' + (/webm/.test(type) ? 'webm' : 'mp4'), { type }));
+    if (blob.size) { const vf = new File([blob], 'video.' + (/webm/.test(type) ? 'webm' : 'mp4'), { type }); vf._takenAt = CAM.recStart || Date.now(); vf._geo = geoFreshFor(vf._takenAt); await camSave(vf); }
     if (CAM._afterStop) { const f = CAM._afterStop; CAM._afterStop = null; f(); }
   };
   rec.start(1000);
@@ -1990,7 +2232,7 @@ function closeCamera(finish, warm) {
     const done = async () => {
       if (CAM.zoom && S.settings.lastZoom !== CAM.zoom) { S.settings.lastZoom = CAM.zoom; saveSettings(); }
       if (warm && CAM.stream && !document.hidden) keepWarm(); else stopTracks();
-      dropAudio(); stopRotatedTrack(); stopMotion(); clearInterval(CAM.recTimer); nightUI(null);
+      dropAudio(); stopRotatedTrack(); stopMotion(); clearInterval(CAM.recTimer); nightUI(null); geoStopSoon();
       if (CAM.ro) { CAM.ro.disconnect(); CAM.ro = null; }
       if (CAM.el) { CAM.el.remove(); CAM.el = null; }
       document.documentElement.classList.remove('cam-open');
@@ -3396,6 +3638,8 @@ async function openSettings() {
       <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
         <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video)</option></select>
         <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
+      <div class="field"><label>Photo location</label><p class="note" style="margin:0">${GEO.err === 'denied' ? '<b class="warn">Off — photos don’t record where they were taken.</b> To turn it on: iPhone Settings → Privacy &amp; Security → Location Services → <b>Safari Websites</b> → <b>While Using the App</b>, with <b>Precise Location</b> on. Then close Site Defects (swipe it away) and open it again.' : GEO.fix ? `On · last reading ±${Math.round(GEO.fix.acc)} m, ${fmtTime(GEO.fix.t)}. Each photo records where it was taken.` : 'Each photo records where it was taken. The iPhone asks for permission the first time you take a photo: choose <b>Allow While Using App</b>.'}</p></div>
+      <div class="field"><label for="s-model">This iPhone’s model (optional)</label><input id="s-model" value="${esc(S.settings.deviceModel || '')}" placeholder="e.g. iPhone 17 Pro" maxlength="40"><span class="hint">Written into each new photo’s details as the camera model. iOS doesn’t tell web apps which iPhone they’re on, so photos say just “iPhone” unless this is filled in (photos from the iPhone camera or ＋ Library keep the model iOS recorded).</span></div>
       <label class="check toggle-row"><input type="checkbox" id="s-camzoom"><span>Built-in camera keeps its zoom<span class="hint">On: the camera opens at the zoom you last used. Off: it always opens at 1×, like the iPhone Camera app.</span></span></label>
       <div class="field"><label for="s-vq">Built-in camera video quality</label><select id="s-vq">
         <option value="1080">1080p · about 90 MB per minute</option><option value="4k">4K · about 190 MB per minute</option></select></div>
@@ -3442,7 +3686,7 @@ async function openSettings() {
       $('#s-save', el).onclick = async () => {
         const v = $('#s-ini', el).value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!v) { toast('Initials can’t be empty'); return; }
-        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.camZoomKeep = $('#s-camzoom', el).checked; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value; S.settings.keepDays = +$('#s-keep', el).value;
+        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.camZoomKeep = $('#s-camzoom', el).checked; S.settings.deviceModel = $('#s-model', el).value.trim(); S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value; S.settings.keepDays = +$('#s-keep', el).value;
         await saveSettings(); close(); render(); toast('Settings saved'); autoClean();
       };
     }
@@ -3462,7 +3706,8 @@ function appModelParts() {
     value: valueOf(o), ans: o.ans || '', notes: o.notes || '', photos: (o.photoIds || []).map(photoById).filter(Boolean).map(photoRef),
     inspector: o.inspector || '', updatedAt: o.updatedAt || 0 }));
   const photos = S.photos.map(x => ({ name: x.name, path: photoPath(x), kind: x.kind || 'photo', origName: origNameOf(x), unit: x.unit, component: x.component,
-    defectIds: x.defectIds || [], takenAt: x.takenAt, initials: x.initials || '', takenDuring: x.takenDuring || '', movedFrom: x.movedFrom || '', size: x.size || 0 }));
+    defectIds: x.defectIds || [], takenAt: x.takenAt, initials: x.initials || '', takenDuring: x.takenDuring || '', movedFrom: x.movedFrom || '', size: x.size || 0,
+    shotAt: x.shotAt || null, geo: x.geo || null, device: x.device || '' }));
   const project = { number: p.number, name: p.name || '', units: p.units, components: p.components, defects: p.defects, roofBy: p.roofBy || 'unit', bldgComps: p.bldgComps || [], multiComps: p.multiComps || [], inst: p.inst || {} };
   return { project, obs, photos };
 }

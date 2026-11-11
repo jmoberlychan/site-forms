@@ -393,18 +393,20 @@ function buildWorkbookFromModel(M) {
   }
 
   /* --- Photo log --- */
-  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during', 'Moved from unit']];
-  const sortedPh = [...M.photos].sort((a, b) => a.takenAt - b.takenAt);
+  const pRows = [['Photo / video', 'Type', 'Original file name', 'Unit', 'Component', 'Proves (linked conditions)', 'Results', 'Taken', 'Inspector', 'Folder', 'Taken during', 'Moved from unit', 'Latitude', 'Longitude', 'Location accuracy (m)', 'Device', 'Added to app']];
+  const sortedPh = [...M.photos].sort((a, b) => (a.shotAt || a.takenAt) - (b.shotAt || b.takenAt));
   for (const ph of sortedPh) {
     // 1.9.1: a photo linked to a component's General notes & photos (not one particular defect)
     const gen = (ph.defectIds || []).filter(id => String(id).startsWith('_general::')).map(id => { const { base, n } = splitCid(id), c = String(base).split('::')[1]; return { id, label: 'General photo (' + c + (n ? ' · ' + itemName(ph.unit, c, n) : '') + ')', general: true }; });
     const ds = [...(ph.defectIds || []).filter(id => !String(id).startsWith('_general::')).map(id => { const d = defById.get(baseOf(id)), n = itemOf(id); return d ? { ...d, id, label: (n ? itemName(ph.unit, d.component, n) + ': ' : '') + d.label } : null; }).filter(Boolean), ...gen];
     pRows.push([hyperlink(ph.name, ph.path), ph.kind === 'video' ? 'Video' : 'Photo', ph.origName || '', ph.unit, ph.component, ds.map(d => d.label).join('; ') || '(not linked)',
-      ds.map(d => { if (d.general) return '–'; const o = getO(ph.unit, d.id); return o ? (o.conflict === 'Unresolved' ? 'conflict' : (o.value || '–')) : '–'; }).join('; '), new Date(ph.takenAt), ph.initials || '', ph.path.replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '']);
+      ds.map(d => { if (d.general) return '–'; const o = getO(ph.unit, d.id); return o ? (o.conflict === 'Unresolved' ? 'conflict' : (o.value || '–')) : '–'; }).join('; '), new Date(ph.shotAt || ph.takenAt), ph.initials || '', ph.path.replace(/\/[^/]+$/, ''), ph.takenDuring && ph.takenDuring !== ph.component ? ph.takenDuring : '', ph.movedFrom || '',
+      // 1.13.0: where it was taken, and the device; "Added to app" only for ＋ Library photos taken earlier
+      ph.geo ? +ph.geo.lat.toFixed(7) : '', ph.geo ? +ph.geo.lon.toFixed(7) : '', ph.geo && ph.geo.acc != null ? Math.round(ph.geo.acc) : '', ph.device || '', ph.shotAt ? new Date(ph.takenAt) : '']);
   }
   const wsP = XLSX.utils.aoa_to_sheet(capCells(pRows), { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
-  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }, { wch: 14 }];
-  wsP['!autofilter'] = { ref: `A1:L${Math.max(pRows.length, 2)}` };
+  wsP['!cols'] = [{ wch: 30 }, { wch: 7 }, { wch: 26 }, { wch: 12 }, { wch: 14 }, { wch: 44 }, { wch: 9 }, { wch: 17 }, { wch: 9 }, { wch: 34 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 13 }, { wch: 10 }, { wch: 16 }, { wch: 17 }];
+  wsP['!autofilter'] = { ref: `A1:Q${Math.max(pRows.length, 2)}` };
 
   /* --- Change log --- */
   const lHead = ['Exported', 'Inspector', 'Unit', 'Component', 'Code', 'Defect condition', 'Item', 'Change', 'Old value', 'New value'];

@@ -156,6 +156,22 @@ While the Menu or any other panel is open (unit and component lists, Unlinked, t
 
 Always open the app from its Home Screen icon. If it's opened in a Safari tab instead, a yellow banner says so: Safari keeps a separate copy of the app's data, so projects and photos from the Home Screen app don't appear there.
 
+## Photo details: location, time and device (from 1.13.0)
+
+Every photo has its details written into the JPEG file itself (EXIF), so they stay with the photo wherever it's copied. On a Windows PC: right-click the photo → **Properties → Details**.
+
+- **Where:** GPS latitude, longitude, altitude (when the iPhone gives it) and the accuracy of the reading, in metres. iOS removes the location from photos handed to web apps, so the app takes its own reading from Location Services at the moment of each photo. The first time, the iPhone asks to use your location: choose **Allow While Using App**, and keep **Precise Location** on.
+- **When:** the date and time taken, with the time zone and fractions of a second. For the built-in camera it's the moment the shutter was pressed.
+- **Device:** Make "Apple" and the model. iOS doesn't tell web apps which iPhone they're on, so built-in camera photos say "iPhone" unless **Settings → This iPhone's model** is filled in (e.g. `iPhone 17 Pro`). The built-in camera also records the camera used and the zoom. Photos from the iPhone camera or **＋ Library** keep everything iOS recorded (model, lens, exposure, ISO and so on).
+- **What it shows:** project number and name, unit or building, component (and window or door), and inspector, as the photo's description, with the inspector's initials as its author.
+- Nothing already in a photo is overwritten, apart from the description and the "software" field. A photo that has to be re-saved (**Settings → Photo size** set to Medium or Large) keeps its original details.
+- **＋ Library** photos taken in the last 10 minutes get the current location (you're still on site). Older ones only have a location if it was included when they were picked: in the photo picker, tap **Options** at the top and turn on **Location**.
+- **Status:** the built-in camera shows **GPS ±8 m** under the unit name (green), **Finding location…**, or **Location off** (red). Indoors the iPhone may not get a reading; photos are never held up waiting for one (at most a second or so, once a minute). **Settings → Photo location** says whether it's on and how to turn it on.
+- **Videos** can't carry these details; their location is in the Photo Log.
+- **Photo Log:** new columns **Latitude**, **Longitude**, **Location accuracy (m)**, **Device** and **Added to app** (only for **＋ Library** photos taken earlier). **Taken** is when the photo was taken, which for an older library photo is earlier than when it was added. Photos taken before 1.13.0 have none of these.
+
+Location readings only run while photos are being taken (and for 2 minutes after), to save battery.
+
 ## Photo names
 
 `<Project#> <YYYY-MM-DD> <Initials> <####>.jpg`, for example `267180.00 2026-10-02 JJM 0042.jpg` or `267180.00-RENO 2026-10-02 JJM 0042.jpg`.
@@ -198,7 +214,7 @@ Units, components and conditions that are no longer in the file are kept if they
 
 ## Versions and rolling back
 
-Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, `v1.10.4`, `v1.10.5`, `v1.10.6`, `v1.10.7`, `v1.10.8`, `v1.10.9`, `v1.10.10`, `v1.10.11`, `v1.10.12`, `v1.10.13`, `v1.10.14`, `v1.11.0`, `v1.11.1`, `v1.12.0`, `v1.12.1`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files (the icon files are named after the icon design from 1.10.12; from 1.10.14 there are 10: `icon-sgh-gradient-180/192/512.png`, `icon-sgh-charcoal/pattern/mint-180.png` and `icon-clip-gradient/charcoal/pattern/mint-180.png`) plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
+Every version is saved, complete, in its own folder inside `site-forms_claude` on the Desktop (`v1.0.1`, `v1.1.0`, `v1.2.0`, `v1.3.2`, `v1.4.0`, `v1.4.1`, `v1.4.2`, `v1.4.3`, `v1.4.4`, `v1.4.5`, `v1.4.6`, `v1.5.0`, `v1.5.1`, `v1.6.0`, `v1.7.0`, `v1.7.1`, `v1.7.2`, `v1.7.3`, `v1.7.4`, `v1.7.5`, `v1.8.0`, `v1.9.0`, `v1.9.1`, `v1.9.2`, `v1.10.0`, `v1.10.1`, `v1.10.2`, `v1.10.3`, `v1.10.4`, `v1.10.5`, `v1.10.6`, `v1.10.7`, `v1.10.8`, `v1.10.9`, `v1.10.10`, `v1.10.11`, `v1.10.12`, `v1.10.13`, `v1.10.14`, `v1.11.0`, `v1.11.1`, `v1.12.0`, `v1.12.1`, `v1.13.0`, …). Each folder holds all the app files (10 up to 1.7.5; from 1.8.0, 11 app files (the icon files are named after the icon design from 1.10.12; from 1.10.14 there are 10: `icon-sgh-gradient-180/192/512.png`, `icon-sgh-charcoal/pattern/mint-180.png` and `icon-clip-gradient/charcoal/pattern/mint-180.png`) plus the 3 Combine page files `combine.html`, `combine.js` and `xlsx-style.min.js`), the PC combine tool, and `VERSION.txt` describing what changed.
 
 To go back to a version, upload **all the files** from that version's folder to GitHub (they replace the current ones), then open the app twice on each phone. Projects, results and photos on the phone are not affected. Versions before 1.3.2 don't have automatic updates, so after rolling back that far, phones may need an extra open or two to pick up later updates.
 

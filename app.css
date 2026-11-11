@@ -616,3 +616,9 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .cam-nightui-t { color: #FFD60A; font-weight: 700; font-size: 16px; margin-bottom: 8px; }
 .cam-nightbar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; }
 .cam-nightbar span { display: block; height: 100%; width: 0; background: #FFD60A; }
+
+/* 1.13.0: location status in the camera */
+.cam-ctx .geo { font-size: 12px; font-weight: 600; }
+.cam-ctx .geo.on { color: #7fe0a4; }
+.cam-ctx .geo.wait { color: #d6dcd9; }
+.cam-ctx .geo.off { color: #ff8a8a; }
