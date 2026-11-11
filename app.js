@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.11.1';
+const APP_VERSION = '1.12.0';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -654,6 +654,8 @@ async function addPhotos(files, linkDefectId) {
       if (vid) {
         if (list.length === 1) busy('Saving video…');
         thumb = await videoThumb(f); // videos are kept exactly as recorded
+      } else if (f._thumb) {
+        thumb = f._thumb;   // 1.12.0: built-in camera — already sized and thumbnailed when it was taken, so no second decode here
       } else {
         const img = await loadImg(f);
         const isJpeg = /^image\/jpe?g$/i.test(f.type || '') || (!f.type && /\.jpe?g$/i.test(f.name || ''));
@@ -674,7 +676,9 @@ async function addPhotos(files, linkDefectId) {
       const taken = new Set(S.photos.map(origNameOf));
       if (taken.has(orig)) { const base = orig.replace(/\.\w+$/, ''); let k = 2; while (taken.has(`${base}_${k}.${ext}`)) k++; orig = `${base}_${k}.${ext}`; }
       const meta = { id: uid(), projectId: S.project.id, kind: vid ? 'video' : 'photo', ext, name, origName: orig, unit, component, takenAt, initials, seq, size: full.size, defectIds: linkDefectId ? [linkDefectId] : [], exp: { r: null, o: null } };
-      if (!vid) { meta.crc = await crcOfBlob(full); meta.crcSize = full.size; }   // checksum for the ZIP, worked out now while the photo is in memory
+      // checksum for the ZIP. 1.12.0: built-in camera photos skip it here (it slowed every shot); it's worked out in the
+      // background after the camera closes (crcIdle), or at export at the latest.
+      if (!vid && !f._thumb) { meta.crc = await crcOfBlob(full); meta.crcSize = full.size; }
       const d = await db(); const t = d.transaction(['photos', 'blobs', 'thumbs'], 'readwrite');
       t.objectStore('photos').put(meta); t.objectStore('blobs').put(full, meta.id); t.objectStore('thumbs').put(thumb, meta.id);
       await txDone(t);
@@ -807,6 +811,22 @@ async function deleteSessionPhoto(p, session) {
   return ok;
 }
 const sessionOpts = session => ({ canDel: p => !!freshTail(p, session), del: p => deleteSessionPhoto(p, session) });
+// 1.12.0: ZIP checksums for built-in camera photos are worked out in quiet moments after the camera closes
+// (export still works them out for any photo that doesn't have one yet).
+let crcRunning = false;
+async function crcIdle() {
+  if (crcRunning || CAM.el || !S.project) return; crcRunning = true;
+  try {
+    for (const p of S.photos.filter(x => !x.removed && !isVideo(x) && x.crc == null)) {
+      if (CAM.el || document.hidden) break;
+      const b = await get('blobs', p.id); if (!b) continue;
+      const crc = await crcOfBlob(b);
+      if (photoById(p.id) !== p || p.crc != null) continue;   // deleted or changed meanwhile
+      p.crc = crc; p.crcSize = b.size; await savePhotoMeta(p);
+      await sleep(40);
+    }
+  } catch (_) {} finally { crcRunning = false; }
+}
 async function ensureObs(unit, defectId) {
   const key = obsKey(unit, defectId);
   let o = S.obs.get(key);
@@ -866,6 +886,7 @@ function capture(defectId, continuing) {
   if (storageBlocked()) return;
   if (!continuing || !batch) batch = { defectId: defectId || null, photos: [] };
   if (S.settings.camera === 'builtin' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) { openCamera(); return; }
+  dropWarm();
   pendingCapture = { defectId: batch.defectId };
   const inp = $('#cam-input'); inp.value = ''; watchPicker(inp); inp.click();
 }
@@ -970,6 +991,8 @@ const VQ = { '1080': { w: 1920, h: 1080, bps: 12e6, label: '1080p' }, '4k': { w:
 const ICON = {
   flashOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.2 2.5 5 13.6h6.1l-1.3 7.9 8.2-11.1h-6.1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4.5 3.5l15 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   flashOn: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.2 2.5 5 13.6h6.1l-1.3 7.9 8.2-11.1h-6.1z" fill="currentColor"/></svg>',
+  moon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
+  torch: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v4l-3 4v9.5h-4V11L7 7z" fill="currentColor"/><path d="M12 13.2v2.2" stroke="#000" stroke-width="1.6" stroke-linecap="round"/></svg>',
   chevUp: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   chevDown: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
@@ -1027,10 +1050,17 @@ function openCamera() {
   if (CAM.el) return;
   if (CAM.mode === 'video' && !pickRecMime()) CAM.mode = 'photo';
   CAM.optsOpen = false; CAM.focusLocked = false; CAM.log = []; CAM.err = '';
+  // 1.12.0: open at 1× like the iPhone Camera, unless Settings → "Built-in camera keeps its zoom" is on
+  if (S.settings.camZoomKeep) CAM.zoom = S.settings.lastZoom || CAM.zoom || 1;
+  else {
+    CAM.zoom = 1;
+    if (CAM.lensId && !(CAM.virt && CAM.lensId === CAM.virt.id)) { const w = lensOfKind('wide'); if (w) CAM.lensId = w.id; }
+  }
+  CAM.fixLens = true; CAM.pending = 0; CAM.popOpen = null;
   const el = document.createElement('div'); el.className = 'cam'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Camera');
   el.innerHTML = `
     <div class="cam-top">
-      <button class="cam-ico cam-flash-btn" data-cam="torch" aria-label="Flash" aria-pressed="false">${ICON.flashOff}</button>
+      <div class="cam-top-left"><button class="cam-ico cam-flash-btn" data-cam="torch" aria-label="Flash">${ICON.flashOff}</button><button class="cam-ico cam-night-btn" data-cam="night" aria-label="Night mode">${ICON.moon}<b class="cam-night-s"></b></button></div>
       <div class="cam-top-mid">
         <button class="cam-chev" data-cam="opts" aria-label="Camera options" aria-expanded="false">${ICON.chevDown}</button>
         <div class="cam-timer" hidden>00:00:00</div>
@@ -1043,6 +1073,7 @@ function openCamera() {
       <div class="cam-opts-row"><button class="cam-link" data-cam="restart">Restart camera</button><button class="cam-link" data-cam="native">Use iPhone camera</button></div>
       <div class="cam-diag"></div>
     </div>
+    <div class="cam-pop" hidden></div>
     <div class="cam-stage">
       <div class="cam-vf">
         <video class="cam-view" playsinline autoplay muted></video>
@@ -1054,6 +1085,7 @@ function openCamera() {
         <div class="cam-dial" hidden aria-hidden="true"><div class="cam-dial-val"></div><svg class="cam-dial-svg"></svg></div>
         <div class="cam-zoomrow" role="group" aria-label="Zoom"></div>
         <div class="cam-msg" hidden></div>
+        <div class="cam-nightui" hidden><div class="cam-nightui-t">Hold still</div><div class="cam-nightbar"><span></span></div></div>
       </div>
     </div>
     <div class="cam-bottom">
@@ -1079,6 +1111,7 @@ function openCamera() {
   $('[data-cam-tele]', el).addEventListener('change', async e => { S.settings.teleF = +e.target.value; await saveSettings(); setZoom(CAM.zoom); camUpdate(); });
   document.addEventListener('batchchange', camUpdate);
   document.addEventListener('visibilitychange', camVisibility);
+  document.addEventListener('keydown', camKey);
   if (window.ResizeObserver) { CAM.ro = new ResizeObserver(() => { fitViewfinder(); centerModes(); }); CAM.ro.observe($('.cam-stage', el)); }
   camRotInit();
   camUpdate(); requestAnimationFrame(centerModes); startStream();
@@ -1106,6 +1139,8 @@ async function startStream() {
   if (CAM.starting) { CAM.again = true; return; }
   CAM.starting = true; CAM.err = '';
   const v = $('.cam-view', CAM.el);
+  if (!CAM.lensId && S.settings.camVirtId && !CAM.virtBad) CAM.lensId = S.settings.camVirtId;
+  const warm = CAM.stream ? (dropWarm(), null) : takeWarm();   // 1.12.0: reopened within 45 s: the camera is still running
   const hadStream = !!CAM.stream;
   if (hadStream) showFreeze();
   stopTracks(); v.pause(); v.srcObject = null;
@@ -1122,8 +1157,9 @@ async function startStream() {
     { video: { facingMode: 'environment' }, audio },
     { video: true, audio: false },
   ];
-  if (!hadStream) camMsg('Starting camera…');
-  let stream = null, lastErr = null;
+  if (!hadStream && !warm) camMsg('Starting camera…');
+  let stream = warm, lastErr = null;
+  if (warm) camLog('camera still running');
   for (let i = 0; i < tries.length && !stream; i++) {
     try { camLog('request ' + (i + 1)); stream = await withTimeout(navigator.mediaDevices.getUserMedia(tries[i]), 12000, 'Camera request'); }
     catch (e) {
@@ -1144,7 +1180,7 @@ async function startStream() {
   CAM.stream = stream; CAM.track = stream.getVideoTracks()[0];
   CAM.label = CAM.track.label || '';
   camLog('got ' + (CAM.label || 'camera'));
-  CAM.track.addEventListener('ended', () => { camLog('track ended'); if (CAM.el && !document.hidden && !CAM.starting) startStream(); });
+  if (!CAM.track._sdEnd) { CAM.track._sdEnd = true; CAM.track.addEventListener('ended', () => { camLog('track ended'); if (CAM.el && CAM.track && !document.hidden && !CAM.starting) startStream(); }); }
   if (!v._fit) { v._fit = true; v.addEventListener('resize', () => { fitViewfinder(); }); }
   v.srcObject = stream;
   const p = v.play(); if (p && p.catch) p.catch(e => camLog('play: ' + e.name));
@@ -1158,11 +1194,12 @@ async function startStream() {
   });
   CAM.starting = false;
   if (!CAM.el) return;
+  if (!ok && warm) { camLog('warm camera gave no picture'); stopTracks(); startStream(); return; }
   if (!ok) { camLog('waiting for tap'); camMsg('Tap to start the camera', false, true); }
   else camMsg(null);
   await findLenses();
   readCaps();
-  if (CAM.torch) setTorch(true, true);
+  CAM.torch = false; applyFlash();
   const { min, max } = zoomLimits();
   CAM.zoom = Math.min(max, Math.max(min, CAM.zoom || 1));
   if (!digitalAllowed() && !CAM.native) CAM.zoom = lensBase();   // video shows exactly the lens in use
@@ -1175,7 +1212,35 @@ async function startStream() {
   if (CAM.virt && !CAM.virtBad && CAM.lensId !== CAM.virt.id && !CAM.rec) {
     camLog('switching to multi-camera'); CAM.lensId = CAM.virt.id; S.settings.camVirtId = CAM.virt.id; saveSettings(); startStream(); return;
   }
+  // 1.12.0: opened at a kept zoom that belongs on another lens (phones without the combined camera)
+  if (CAM.fixLens) { CAM.fixLens = false; const want = lensFor(CAM.zoom); if (want && want !== CAM.lensId && !CAM.rec) { switchLens(want); return; } }
 }
+/* ---------- 1.12.0: keep the camera running for a short while after it closes ----------
+   Opening the camera is the slowest step (iOS takes about a second). After Done or a full batch, the camera keeps running
+   for 45 seconds with nothing on screen, so "Take another" or the Photo button opens it instantly. iOS shows its green
+   camera dot meanwhile. It's released at once if the app goes to the background or the iPhone camera is used. */
+const WARM_MS = 45000;
+function keepWarm() {
+  dropWarm();
+  if (CAM.torch && CAM.track) CAM.track.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
+  CAM.torch = false;
+  CAM.warm = { stream: CAM.stream, mode: CAM.mode, lensId: CAM.lensId };
+  CAM.stream = null; CAM.track = null;
+  CAM.warmT = setTimeout(dropWarm, WARM_MS);
+}
+function dropWarm() {
+  clearTimeout(CAM.warmT);
+  if (CAM.warm) { CAM.warm.stream.getTracks().forEach(t => t.stop()); CAM.warm = null; }
+}
+function takeWarm() {
+  const w = CAM.warm; clearTimeout(CAM.warmT); CAM.warm = null;
+  if (!w) return null;
+  const t = w.stream.getVideoTracks()[0];
+  if (t && t.readyState === 'live' && w.mode === CAM.mode && w.lensId === CAM.lensId) return w.stream;
+  w.stream.getTracks().forEach(x => x.stop());
+  return null;
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) dropWarm(); });
 async function findLenses() {
   try {
     if (!CAM.lenses.length) {
@@ -1361,10 +1426,17 @@ function applyZoom() {
   const v = $('.cam-view', CAM.el);
   if (CAM.native) {
     const nz = onVirtual() ? CAM.zoom * zMul() : rel;
-    CAM.track && CAM.track.applyConstraints({ advanced: [{ zoom: Math.min(CAM.native.max, Math.max(CAM.native.min, nz)) }] }).catch(() => {});
+    CAM.zWant = Math.min(CAM.native.max, Math.max(CAM.native.min, nz)); pushZoom();
   }
   setViewTransform();
   renderZoomRow(); updateDial();
+}
+// 1.12.0: one zoom change at a time. During a pinch, the newest level waits for the previous change to finish, instead of
+// queuing dozens of changes that iOS works through one by one (the lag felt while zooming).
+function pushZoom() {
+  const t = CAM.track; if (!t || CAM.zBusy || CAM.zWant == null) return;
+  const z = CAM.zWant; CAM.zWant = null; CAM.zBusy = true;
+  t.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {}).then(() => { CAM.zBusy = false; pushZoom(); });
 }
 function digitalFactor() { return digitalAllowed() ? Math.max(1, CAM.zoom / nativeTop()) : 1; }
 // The video element's transform: digital zoom, plus turning the picture back upright if iOS rotated the page.
@@ -1533,7 +1605,7 @@ function camCtxHTML() {
 }
 function camUpdate() {
   if (!CAM.el) return;
-  const n = batch ? batch.photos.length : 0, N = batchSize();
+  const n = batchCount(), N = batchSize();
   $('.cam-ctx', CAM.el).innerHTML = camCtxHTML();
   $('.cam-batch .n', CAM.el).textContent = n; $('.cam-batch .of', CAM.el).textContent = 'of ' + N;
   $('.cam-batch', CAM.el).style.setProperty('--p', Math.min(1, n / N));
@@ -1542,9 +1614,15 @@ function camUpdate() {
   CAM.el.querySelectorAll('[data-cam="mode"]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === CAM.mode));
   requestAnimationFrame(centerModes);
   $('[data-cam="shoot"]', CAM.el).setAttribute('aria-label', CAM.mode === 'video' ? (CAM.rec ? 'Stop recording' : 'Start recording') : 'Take photo');
-  const tb = $('[data-cam="torch"]', CAM.el);
-  tb.innerHTML = CAM.torch ? ICON.flashOn : ICON.flashOff; tb.setAttribute('aria-pressed', CAM.torch); tb.classList.toggle('on', CAM.torch);
+  const tb = $('[data-cam="torch"]', CAM.el), fm = flashMode();
+  tb.innerHTML = fm === 'on' ? ICON.torch : fm === 'flash' ? ICON.flashOn : ICON.flashOff;
+  tb.setAttribute('aria-label', 'Flash: ' + FLASH_LABEL[fm]);
+  tb.classList.toggle('on', fm === 'on'); tb.classList.toggle('auto', fm === 'flash');
   tb.classList.toggle('na', !!CAM.track && !(CAM.caps && CAM.caps.torch));
+  const nb = $('[data-cam="night"]', CAM.el), ns = S.settings.night || 0;
+  nb.hidden = CAM.mode === 'video' || !!CAM.rec; nb.classList.toggle('on', !!ns); $('.cam-night-s', nb).textContent = ns ? ns + 's' : '';
+  nb.setAttribute('aria-label', 'Night mode: ' + (ns ? ns + ' seconds' : 'off'));
+  renderPop();
   const opts = $('.cam-opts', CAM.el), ch = $('.cam-chev', CAM.el);
   opts.hidden = !CAM.optsOpen || !!CAM.rec; $('.cam-modes', CAM.el).style.visibility = CAM.rec ? 'hidden' : '';
   if (CAM.optsOpen) renderDiag();
@@ -1556,8 +1634,9 @@ function camUpdate() {
   CAM.el.querySelectorAll('[data-bs="-1"]').forEach(b => b.disabled = !!CAM.rec || batchSize() <= 1);
   CAM.el.querySelectorAll('[data-bs="1"]').forEach(b => b.disabled = !!CAM.rec || batchSize() >= 10);
   const last = batch && batch.photos[batch.photos.length - 1], lb = $('.cam-last', CAM.el);
-  if (last) thumbSrc(last.id).then(u => { if (u && CAM.el) lb.style.backgroundImage = `url("${u}")`; }); else lb.style.backgroundImage = '';
-  lb.classList.toggle('has', !!last);
+  if (CAM.pendingThumb) lb.style.backgroundImage = `url("${CAM.pendingThumb}")`;   // 1.12.0: the newest shot shows at once, before it's saved
+  else if (last) thumbSrc(last.id).then(u => { if (u && CAM.el && !CAM.pendingThumb) lb.style.backgroundImage = `url("${u}")`; }); else lb.style.backgroundImage = '';
+  lb.classList.toggle('has', !!last || !!CAM.pendingThumb);
   renderZoomRow();
 }
 function camMsg(html, withActions, tapToPlay) {
@@ -1568,6 +1647,35 @@ function camMsg(html, withActions, tapToPlay) {
     ? `<button class="cam-pill cam-play" data-cam="play">${html}</button>`
     : `<p>${html}</p>${withActions ? '<div class="cam-msg-acts"><button class="cam-pill" data-cam="retry">Try again</button><button class="cam-pill" data-cam="native">Use iPhone camera</button></div>' : ''}`;
 }
+/* ---------- 1.12.0: flash — Off / Flash (lights for each photo) / Always on ----------
+   iOS lets a web app switch the iPhone's light on and off (the torch), not fire a real flash. "Flash" turns the light on,
+   gives the camera a moment to adjust its exposure, takes the photo, and turns the light off again. In Video, it lights
+   while recording. "Always on" keeps the light on while the camera is open. */
+const FLASH_LABEL = { off: 'Off', flash: 'Flash', on: 'Always on' };
+const FLASH_NOTE = { off: 'The light stays off.', flash: 'The light comes on for a moment as each photo is taken (in Video, while recording).', on: 'The light stays on while the camera is open.' };
+const FLASH_SETTLE_MS = 600;   // time for the camera's exposure to catch up with the light
+function flashMode() { return FLASH_LABEL[S.settings.flash] ? S.settings.flash : 'off'; }
+function applyFlash() {
+  const fm = flashMode();
+  const lit = fm === 'on' || !!CAM.flashing || (fm === 'flash' && !!CAM.rec);
+  if (!CAM.track) { CAM.torch = false; return; }
+  if (lit === CAM.torch) { camUpdate(); return; }
+  setTorch(lit, true);
+}
+function renderPop() {
+  const pop = CAM.el && $('.cam-pop', CAM.el); if (!pop) return;
+  if (!CAM.popOpen || CAM.rec) { pop.hidden = true; pop.innerHTML = ''; return; }
+  pop.hidden = false;
+  if (CAM.popOpen === 'flash') {
+    const fm = flashMode();
+    pop.innerHTML = `<div class="cam-pop-h">Flash</div><div class="cam-pop-row">${['off', 'flash', 'on'].map(k => `<button data-cam="flashset" data-v="${k}" aria-pressed="${fm === k}">${FLASH_LABEL[k]}</button>`).join('')}</div><div class="cam-pop-note">${FLASH_NOTE[fm]}</div>`;
+  } else {
+    const n = S.settings.night || 0;
+    pop.innerHTML = `<div class="cam-pop-h">Night mode</div><div class="cam-pop-row">${[0, 1, 2, 3].map(k => `<button data-cam="nightset" data-v="${k}" aria-pressed="${n === k}">${k ? k + ' s' : 'Off'}</button>`).join('')}</div>
+      <div class="cam-pop-note">${n ? `Each photo takes ${n} second${n > 1 ? 's' : ''}. Hold the phone still (lean it on something if you can) until the bar fills.` : 'For dark places: the camera combines many frames over 1–3 seconds into one brighter, cleaner photo.'}</div>`;
+  }
+}
+function closePop() { if (CAM.popOpen) { CAM.popOpen = null; renderPop(); } }
 function setTorch(on, quiet) {
   CAM.torch = on;
   if (CAM.track) CAM.track.applyConstraints({ advanced: [{ torch: on }] }).catch(() => { if (!quiet) toast('Flashlight not available on this lens'); });
@@ -1596,13 +1704,17 @@ async function ensureAudio() {
 }
 function dropAudio() { if (CAM.audio) { CAM.audio.stop(); CAM.audio = null; } }
 async function onCamClick(e) {
+  if (CAM.popOpen && !e.target.closest('.cam-pop, [data-cam="torch"], [data-cam="night"]')) closePop();
   const b = e.target.closest('[data-cam]'); if (!b || b.disabled) return;
   const a = b.dataset.cam;
   if (a === 'shoot') return CAM.mode === 'video' ? toggleRecord() : snapPhoto();
-  if (a === 'done') return closeCamera(true);
+  if (a === 'done') return closeCamera(true, true);
   if (a === 'retry' || a === 'restart') { CAM.optsOpen = false; camUpdate(); return startStream(); }
   if (a === 'play') { const v = $('.cam-view', CAM.el); try { await v.play(); } catch (err) { camLog('tap play: ' + err.name); } if (v.videoWidth && !v.paused) camMsg(null); else startStream(); return; }
-  if (a === 'opts') { CAM.optsOpen = !CAM.optsOpen; return camUpdate(); }
+  if (a === 'opts') { CAM.optsOpen = !CAM.optsOpen; CAM.popOpen = null; return camUpdate(); }
+  if (a === 'night') { CAM.popOpen = CAM.popOpen === 'night' ? null : 'night'; CAM.optsOpen = false; return camUpdate(); }
+  if (a === 'flashset') { S.settings.flash = b.dataset.v; saveSettings(); applyFlash(); return camUpdate(); }
+  if (a === 'nightset') { S.settings.night = +b.dataset.v; saveSettings(); return camUpdate(); }
   if (a === 'mode') return switchMode(b.dataset.v);
   if (a === 'zoom') {
     if ($('.cam-zoomrow', CAM.el)._suppressClick) return;
@@ -1611,7 +1723,7 @@ async function onCamClick(e) {
   }
   if (a === 'torch') {
     if (CAM.track && !(CAM.caps && CAM.caps.torch)) { toast(CAM.lenses.length ? 'Flash isn’t available on this lens — try the 1× lens' : 'Flash isn’t available on this camera'); return; }
-    return setTorch(!CAM.torch);
+    CAM.popOpen = CAM.popOpen === 'flash' ? null : 'flash'; CAM.optsOpen = false; return camUpdate();
   }
   if (a === 'native') {
     S.settings.camera = 'native'; await saveSettings();
@@ -1624,22 +1736,181 @@ async function onCamClick(e) {
   }
 }
 function blink() { const f = $('.cam-blink', CAM.el); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }
+// 1.12.0: the shutter is ready again as soon as the frame is grabbed. Turning it into a JPEG, making the thumbnail and
+// saving it carry on in the background, one photo after another in the order taken (before, each photo had to be fully
+// saved before the next could be taken). The thumbnail is made from the frame itself, not by decoding the JPEG again.
+function batchCount() { return (batch ? batch.photos.length : 0) + (CAM.pending || 0); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const blobOf = (c, q) => new Promise(r => c.toBlob(r, 'image/jpeg', q));
+// Draw part of a picture into a new canvas, turned by r degrees (0 or ±90) and scaled by k.
+function drawTurned(src, sx, sy, sw, sh, r, k) {
+  const w = Math.max(1, Math.round(sw * k)), h = Math.max(1, Math.round(sh * k)), side = Math.abs(r) === 90;
+  const c = document.createElement('canvas'); c.width = side ? h : w; c.height = side ? w : h;
+  const g = c.getContext('2d'); if (!g) throw new Error('Out of memory for photos — close other apps');
+  g.translate(c.width / 2, c.height / 2); g.rotate(r * Math.PI / 180);
+  g.drawImage(src, sx, sy, sw, sh, -w / 2, -h / 2, w, h);
+  return c;
+}
+// the size a photo is kept at: Settings → Photo size, and never over the iPhone browser's 16 MP canvas limit
+function keepScale(w, h) { const lim = S.settings.photoMax || 0; return Math.min(1, lim ? lim / Math.max(w, h) : 1, Math.sqrt(CANVAS_MAX_PX / (w * h))); }
 async function snapPhoto() {
   if (CAM.busy || !CAM.track) return;
   const v = $('.cam-view', CAM.el); if (!v.videoWidth) return;
-  CAM.busy = true; blink();
+  if (batchCount() >= batchSize()) return;          // batch full: its last photos are still being saved
+  CAM.busy = true; closePop();
+  const night = CAM.mode === 'photo' ? (S.settings.night || 0) : 0;
+  const useFlash = flashMode() === 'flash' && !!(CAM.caps && CAM.caps.torch);
+  const r = captureRotation();                                      // phone held sideways → landscape photo
+  let out = null;
   try {
+    if (useFlash) { CAM.flashing = true; applyFlash(); await sleep(FLASH_SETTLE_MS); if (!CAM.el || !CAM.track) return; }
     const d = digitalFactor();
     const sw = Math.round(v.videoWidth / d), sh = Math.round(v.videoHeight / d);
-    const sx = Math.round((v.videoWidth - sw) / 2), sy = Math.round((v.videoHeight - sh) / 2);
-    const r = captureRotation();                                      // phone held sideways → landscape photo
-    const c = document.createElement('canvas'); c.width = r ? sh : sw; c.height = r ? sw : sh;
-    const g = c.getContext('2d');
-    g.translate(c.width / 2, c.height / 2); g.rotate(r * Math.PI / 180);
-    g.drawImage(v, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);          // digital zoom = centre crop, no upscaling
-    // hand the save over straight away (before the JPEG is encoded) so a quick Done waits for it
-    await camSave(new Promise(r => c.toBlob(r, 'image/jpeg', 0.92)).then(blob => blob && new File([blob], 'capture.jpg', { type: 'image/jpeg' })));
-  } finally { CAM.busy = false; }
+    const sx = Math.round((v.videoWidth - sw) / 2), sy = Math.round((v.videoHeight - sh) / 2);   // digital zoom = centre crop, no upscaling
+    if (night) {
+      const st = await nightCapture(v, sx, sy, sw, sh, night); if (!st) return;
+      blink();
+      out = drawTurned(st, 0, 0, st.width, st.height, r, keepScale(st.width, st.height)); st.width = st.height = 0;
+    } else {
+      blink();
+      out = drawTurned(v, sx, sy, sw, sh, r, keepScale(sw, sh));
+    }
+  } catch (e) { toast('Couldn’t take the photo: ' + (e.message || e)); return; }
+  finally {
+    if (useFlash) { CAM.flashing = false; applyFlash(); }
+    if (!out) CAM.busy = false;
+  }
+  const tc = drawTurned(out, 0, 0, out.width, out.height, 0, Math.min(1, 480 / Math.max(out.width, out.height)));
+  CAM.busy = false;                                                 // ready for the next photo straight away
+  CAM.pending = (CAM.pending || 0) + 1; camUpdate();
+  const thumbP = blobOf(tc, 0.72).then(tb => {
+    tc.width = tc.height = 0;
+    if (tb && CAM.el) { const old = CAM.pendingThumb; CAM.pendingThumb = URL.createObjectURL(tb); if (old) setTimeout(() => URL.revokeObjectURL(old), 3000); camUpdate(); }
+    return tb;
+  });
+  const fileP = blobOf(out, 0.92).then(fb => { out.width = out.height = 0; return fb; });
+  await camSave(Promise.all([fileP, thumbP]).then(([fb, tb]) => {
+    if (!fb) throw new Error('Out of memory for photos — close other apps');
+    const f = new File([fb], 'capture.jpg', { type: 'image/jpeg' }); if (tb) f._thumb = tb; return f;
+  }), true);
+}
+/* ---------- 1.12.0: Night mode ----------
+   iOS doesn't let a web app set a long exposure, so Night mode does what the iPhone's own Night mode does underneath:
+   it takes every frame the camera delivers for 1–3 seconds, lines each one up with the first (so small hand movements
+   don't blur it), averages them (which removes most of the grain), then brightens the result. A few pixels round the
+   edge are trimmed, as far as the phone moved. Night photos are up to about 8 MP. */
+const NIGHT_MAX_PX = 8e6;
+function nextFrame(v) {
+  return new Promise(res => {
+    let done = false; const fin = () => { if (!done) { done = true; res(); } };
+    setTimeout(fin, 200);
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(fin); else requestAnimationFrame(fin);
+  });
+}
+function greenOf(data) { const n = data.length >> 2, a = new Uint8Array(n); for (let i = 0, j = 1; i < n; i++, j += 4) a[i] = data[j]; return a; }
+// Best shift (dx, dy) of picture b against a, within ±rad of (cx, cy), comparing every step-th pixel away from the edges.
+function bestShift(a, b, w, h, cx, cy, rad, m, step) {
+  let best = Infinity, bx = cx, by = cy;
+  for (let dy = cy - rad; dy <= cy + rad; dy++) for (let dx = cx - rad; dx <= cx + rad; dx++) {
+    let s = 0;
+    for (let y = m; y < h - m && s < best; y += step) { const ra = y * w, rb = (y + dy) * w + dx; for (let x = m; x < w - m; x += step) s += Math.abs(a[ra + x] - b[rb + x]); }
+    if (s < best) { best = s; bx = dx; by = dy; }
+  }
+  return [bx, by];
+}
+function nightUI(frac) {
+  const u = CAM.el && $('.cam-nightui', CAM.el); if (!u) return;
+  if (frac == null) { u.hidden = true; return; }
+  u.hidden = false; $('.cam-nightbar span', u).style.width = Math.round(Math.min(1, frac) * 100) + '%';
+}
+async function nightCapture(v, sx, sy, sw, sh, secs) {
+  const k = Math.min(1, Math.sqrt(NIGHT_MAX_PX / (sw * sh)));
+  const W = Math.round(sw * k), H = Math.round(sh * k);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d', { willReadFrequently: true }); if (!g) throw new Error('Out of memory — close other apps');
+  // small copies for lining frames up: 1/16 and 1/4 of the size
+  const lv = [16, 4].map(f => { const cc = document.createElement('canvas'); cc.width = Math.max(24, Math.round(W / f)); cc.height = Math.max(24, Math.round(H / f)); return { c: cc, g: cc.getContext('2d', { willReadFrequently: true }) }; });
+  const small = () => lv.map(L => { L.g.drawImage(c, 0, 0, L.c.width, L.c.height); return greenOf(L.g.getImageData(0, 0, L.c.width, L.c.height).data); });
+  const acc = new Uint16Array(W * H * 3);
+  const win = Math.min(512, W - 320, H - 320), wx = (W - win) >> 1, wy = (H - win) >> 1;   // full-size patch in the middle, for the last pixel of accuracy
+  let n = 0, ref = null, mx = 0, my = 0, prevA = [0, 0];
+  const t0 = performance.now(), dur = secs * 1000;
+  nightUI(0);
+  try {
+    while ((n === 0 || performance.now() - t0 < dur) && n < 250) {
+      await nextFrame(v);
+      if (!CAM.el || !CAM.track) return null;
+      g.drawImage(v, sx, sy, sw, sh, 0, 0, W, H);
+      const data = g.getImageData(0, 0, W, H).data;
+      const [A, B] = small();
+      let dx = 0, dy = 0;
+      if (!ref) {
+        ref = { A, B, C: null };
+        if (win >= 64) { ref.C = new Uint8Array(win * win); for (let y = 0; y < win; y++) for (let x = 0; x < win; x++) ref.C[y * win + x] = data[((wy + y) * W + wx + x) * 4 + 1]; }
+      } else {
+        const wa = lv[0].c.width, ha = lv[0].c.height, wb = lv[1].c.width, hb = lv[1].c.height;
+        // search near where the previous frame was: hands drift slowly, and a wide search can be fooled by repeating
+        // patterns (siding, tiles, railings) that look the same one repeat further along
+        const [px, py] = prevA;
+        let [ax, ay] = bestShift(ref.A, A, wa, ha, px, py, 3, Math.max(6, Math.abs(px) + 4, Math.abs(py) + 4), 1);
+        prevA = [ax, ay];
+        let [bx, by] = bestShift(ref.B, B, wb, hb, ax * 4, ay * 4, 3, 40, 2);
+        dx = bx * 4; dy = by * 4;
+        if (ref.C && Math.abs(dx) < 150 && Math.abs(dy) < 150) {   // refine to the pixel on the middle patch
+          let best = Infinity, fx = dx, fy = dy;
+          for (let oy = dy - 3; oy <= dy + 3; oy++) for (let ox = dx - 3; ox <= dx + 3; ox++) {
+            let sm = 0;
+            for (let y = 0; y < win && sm < best; y += 2) { const ra = y * win, rb = ((wy + y + oy) * W + wx + ox) * 4 + 1; for (let x = 0; x < win; x += 2) sm += Math.abs(ref.C[ra + x] - data[rb + x * 4]); }
+            if (sm < best) { best = sm; fx = ox; fy = oy; }
+          }
+          dx = fx; dy = fy;
+        }
+        if (Math.abs(dx) > W / 6 || Math.abs(dy) > H / 6) { nightUI((performance.now() - t0) / dur); continue; }   // moved too far: skip this frame
+      }
+      mx = Math.max(mx, Math.abs(dx)); my = Math.max(my, Math.abs(dy));
+      // add the frame, lined up with the first one
+      const x0 = Math.max(0, -dx), x1 = Math.min(W, W - dx);
+      for (let y = Math.max(0, -dy), ye = Math.min(H, H - dy); y < ye; y++) {
+        let i = (y * W + x0) * 3, j = ((y + dy) * W + x0 + dx) * 4;
+        for (let x = x0; x < x1; x++, i += 3, j += 4) { acc[i] += data[j]; acc[i + 1] += data[j + 1]; acc[i + 2] += data[j + 2]; }
+      }
+      n++;
+      nightUI((performance.now() - t0) / dur);
+    }
+  } finally {
+    nightUI(null);
+    lv.forEach(L => { L.c.width = L.c.height = 0; });
+  }
+  if (!n) { c.width = c.height = 0; return null; }
+  // brighten: the brightest 0.3% just reach white (at most 6× brighter), then lift the shadows if the photo is still dark
+  const hist = new Uint32Array(256); let sum = 0, cnt = 0;
+  for (let i = 0; i < acc.length; i += 3 * 7) { const m = Math.max(acc[i], acc[i + 1], acc[i + 2]) / n; hist[Math.min(255, m | 0)]++; sum += (acc[i] * 0.3 + acc[i + 1] * 0.59 + acc[i + 2] * 0.11) / n; cnt++; }
+  let p = 255; for (let t = 0, need = cnt * 0.003; p > 0; p--) { t += hist[p]; if (t >= need) break; }
+  const gain = Math.min(6, Math.max(1, 240 / Math.max(1, p)));
+  const mean = Math.max(1, (sum / cnt) * gain);
+  const gamma = mean < 95 ? Math.min(1, Math.max(0.55, Math.log(105 / 255) / Math.log(mean / 255))) : 1;
+  const lut = new Uint8ClampedArray(4096);
+  for (let t = 0; t < 4096; t++) lut[t] = 255 * Math.pow(Math.min(1, (t / 16) * gain / 255), gamma);
+  // trim the edge the frames didn't all cover
+  const OW = Math.max(1, W - 2 * mx), OH = Math.max(1, H - 2 * my);
+  const img = g.createImageData(OW, OH), o = img.data, f = 16 / n;
+  for (let y = 0; y < OH; y++) {
+    let i = ((y + my) * W + mx) * 3, j = y * OW * 4;
+    for (let x = 0; x < OW; x++, i += 3, j += 4) { o[j] = lut[Math.min(4095, acc[i] * f | 0)]; o[j + 1] = lut[Math.min(4095, acc[i + 1] * f | 0)]; o[j + 2] = lut[Math.min(4095, acc[i + 2] * f | 0)]; o[j + 3] = 255; }
+  }
+  c.width = OW; c.height = OH; g.putImageData(img, 0, 0);
+  camLog(`night: ${n} frames, gain ${gain.toFixed(1)}, trim ${mx}×${my}`);
+  return c;
+}
+// 1.12.0: a Bluetooth keyboard or camera remote that sends Enter or Space works the shutter.
+// (iOS doesn't pass the volume buttons or the Camera Control button to web apps.)
+function camKey(e) {
+  if (!CAM.el || e.repeat || document.querySelector('.pv')) return;
+  if (e.target && e.target.closest && e.target.closest('input, select, textarea')) return;
+  if (['Enter', ' ', 'AudioVolumeUp', 'AudioVolumeDown', 'Camera'].includes(e.key)) {
+    e.preventDefault();
+    const sh = $('[data-cam="shoot"]', CAM.el); if (sh && !sh.disabled) sh.click();
+  }
 }
 function toggleRecord() {
   if (CAM.rec) { CAM.rec.stop(); return; }
@@ -1656,11 +1927,11 @@ function toggleRecord() {
   }
   try { rec = new MediaRecorder(recStream, { mimeType: mime, videoBitsPerSecond: (VQ[S.settings.vidQ] || VQ['1080']).bps }); }
   catch (_) { try { rec = new MediaRecorder(recStream); } catch (e) { toast('Can’t record video here'); return; } }
-  CAM.chunks = []; CAM.rec = rec; CAM.recStart = Date.now(); CAM.optsOpen = false;
+  CAM.chunks = []; CAM.rec = rec; CAM.recStart = Date.now(); CAM.optsOpen = false; CAM.popOpen = null; applyFlash();
   CAM.recBytes = 0;
   rec.ondataavailable = e => { if (e.data && e.data.size) { CAM.chunks.push(e.data); CAM.recBytes += e.data.size; } };
   rec.onstop = async () => {
-    clearInterval(CAM.recTimer); CAM.rec = null; stopRotatedTrack();
+    clearInterval(CAM.recTimer); CAM.rec = null; stopRotatedTrack(); applyFlash();
     const type = (rec.mimeType || mime || 'video/mp4').split(';')[0];
     const blob = new Blob(CAM.chunks, { type }); CAM.chunks = [];
     if (CAM.el) camUpdate();
@@ -1685,32 +1956,46 @@ function toggleRecord() {
 }
 // Saves into the batch that was open when the shutter was pressed, even if Done is tapped mid-save;
 // closeCamera waits for saves still in progress before it links the batch.
-async function camSave(fileOrPromise) {
+async function camSave(fileOrPromise, counted) {
   const b = batch || (batch = { defectId: null, photos: [] });
   if (!CAM.saving) CAM.saving = new Set();
-  const job = Promise.resolve(fileOrPromise).then(file => file ? addPhotos([file], b.defectId) : []).then(added => { b.photos.push(...added); return added; });
-  CAM.saving.add(job);
+  const job = (CAM.chain || Promise.resolve()).catch(() => {})
+    .then(() => fileOrPromise).then(file => file ? addPhotos([file], b.defectId) : []).then(added => { b.photos.push(...added); return added; });
+  CAM.chain = job; CAM.saving.add(job);
   let added = [];
-  try { added = await job; } finally { CAM.saving.delete(job); }
+  try { added = await job; }
+  catch (e) { toast('Couldn’t save the photo: ' + (e.message || e)); }
+  finally {
+    CAM.saving.delete(job);
+    if (counted) CAM.pending = Math.max(0, (CAM.pending || 0) - 1);
+    if (!CAM.pending && CAM.pendingThumb) { const u = CAM.pendingThumb; CAM.pendingThumb = null; setTimeout(() => URL.revokeObjectURL(u), 3000); }
+  }
+  if (!CAM.el) render();   // 1.12.0: the main screen is redrawn once when the camera closes, not after every photo
+  camUpdate();
   if (!added.length) return;
-  render(); camUpdate();
-  if (CAM.el && b === batch && b.photos.length >= batchSize()) { await closeCamera(false); finishBatch(); }
+  if (CAM.el && b === batch && b.photos.length >= batchSize() && !CAM.pending) { await closeCamera(false, true); finishBatch(); }
 }
 function stopTracks() {
   if (CAM.stream) CAM.stream.getTracks().forEach(t => t.stop());
   CAM.stream = null; CAM.track = null;
 }
-function closeCamera(finish) {
+function closeCamera(finish, warm) {
   return new Promise(res => {
     const done = async () => {
-      stopTracks(); dropAudio(); stopRotatedTrack(); stopMotion(); clearInterval(CAM.recTimer);
+      if (CAM.zoom && S.settings.lastZoom !== CAM.zoom) { S.settings.lastZoom = CAM.zoom; saveSettings(); }
+      if (warm && CAM.stream && !document.hidden) keepWarm(); else stopTracks();
+      dropAudio(); stopRotatedTrack(); stopMotion(); clearInterval(CAM.recTimer); nightUI(null);
       if (CAM.ro) { CAM.ro.disconnect(); CAM.ro = null; }
       if (CAM.el) { CAM.el.remove(); CAM.el = null; }
       document.documentElement.classList.remove('cam-open');
       document.removeEventListener('batchchange', camUpdate);
       document.removeEventListener('visibilitychange', camVisibility);
-      if (CAM.saving && CAM.saving.size) await Promise.all([...CAM.saving]);   // photos still being saved join the batch first
+      document.removeEventListener('keydown', camKey);
+      CAM.popOpen = null; CAM.flashing = false;
+      if (CAM.saving && CAM.saving.size) await Promise.all([...CAM.saving]).catch(() => {});   // photos still being saved join the batch first
+      render();
       if (finish) finishBatch();
+      setTimeout(crcIdle, 4000);
       res();
     };
     if (CAM.rec) { CAM._afterStop = done; CAM.rec.stop(); } else done();
@@ -3105,6 +3390,7 @@ async function openSettings() {
       <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
         <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video)</option></select>
         <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
+      <label class="check toggle-row"><input type="checkbox" id="s-camzoom"><span>Built-in camera keeps its zoom<span class="hint">On: the camera opens at the zoom you last used. Off: it always opens at 1×, like the iPhone Camera app.</span></span></label>
       <div class="field"><label for="s-vq">Built-in camera video quality</label><select id="s-vq">
         <option value="1080">1080p · about 90 MB per minute</option><option value="4k">4K · about 190 MB per minute</option></select></div>
       <div class="field"><label for="s-max">Photo size</label><select id="s-max">
@@ -3141,6 +3427,7 @@ async function openSettings() {
       $('#s-max', el).value = String(S.settings.photoMax || 0);
       $('#s-cam', el).value = S.settings.camera || 'native';
       $('#s-lockzoom', el).checked = S.settings.lockZoom !== false;
+      $('#s-camzoom', el).checked = !!S.settings.camZoomKeep;
       $('#s-lockzoom', el).onchange = e => applyZoomLock(e.target.checked);   // takes effect straight away (saved with Save)
       $('#s-vq', el).value = S.settings.vidQ || '1080';
       $('#s-part', el).value = String(S.settings.partMB || 2048);
@@ -3149,7 +3436,7 @@ async function openSettings() {
       $('#s-save', el).onclick = async () => {
         const v = $('#s-ini', el).value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!v) { toast('Initials can’t be empty'); return; }
-        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value; S.settings.keepDays = +$('#s-keep', el).value;
+        S.settings.initials = v; S.settings.photoMax = +$('#s-max', el).value; S.settings.camera = $('#s-cam', el).value; S.settings.lockZoom = $('#s-lockzoom', el).checked; S.settings.camZoomKeep = $('#s-camzoom', el).checked; S.settings.vidQ = $('#s-vq', el).value; S.settings.partMB = +$('#s-part', el).value; S.settings.keepDays = +$('#s-keep', el).value;
         await saveSettings(); close(); render(); toast('Settings saved'); autoClean();
       };
     }
@@ -3671,4 +3958,4 @@ async function unconfirmedReminder() {
   const first = new Date(Math.min(...old.map(p => p.takenAt)));
   alertSheet('Photos waiting for the PC', `${old.length} photo${old.length > 1 ? 's' : ''} (${mb(bytes)}), the oldest from ${first.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${old.length > 1 ? 'haven’t' : 'hasn’t'} been confirmed by a PC receipt yet, so ${old.length > 1 ? 'they’re' : 'it’s'} still taking space on this phone.\n\nExport them, get the ZIPs to whoever combines them, then load the latest receipt (Menu → Load PC receipt). Photos are only cleared after the PC confirms it has them.`);
 }
-loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); setTimeout(() => autoClean().then(() => unconfirmedReminder()).catch(() => {}), 1500); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
+loadAll().then(() => { applyZoomLock(); render(); refreshStorage(); setTimeout(crcIdle, 8000); setTimeout(() => autoClean().then(() => unconfirmedReminder()).catch(() => {}), 1500); }).catch(e => { document.getElementById('app').innerHTML = '<div class="welcome"><h1>Storage unavailable</h1><p>' + esc(e.message || e) + '</p><p>Private Browsing blocks storage. Open the app from your Home Screen or a normal Safari tab.</p></div>'; });
