@@ -1,7 +1,7 @@
 // Site Defects service worker.
 // Online: always fetches the newest app files from the server (so updates arrive on the next open).
 // Offline or very weak signal: serves the copy saved on the phone.
-const VERSION = 'site-defects-v1.10.13';
+const VERSION = 'site-defects-v1.10.14';
 const FILES = [
   './',
   'index.html',
@@ -17,6 +17,10 @@ const FILES = [
   'icon-sgh-charcoal-180.png',
   'icon-sgh-pattern-180.png',
   'icon-sgh-mint-180.png',
+  'icon-clip-gradient-180.png',
+  'icon-clip-charcoal-180.png',
+  'icon-clip-pattern-180.png',
+  'icon-clip-mint-180.png',
 ];
 const NETWORK_TIMEOUT_MS = 4000;
 

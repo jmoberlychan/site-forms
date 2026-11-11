@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.13';
+const APP_VERSION = '1.10.14';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -3442,16 +3442,15 @@ function showBrowserBanner() {
 // from the page's apple-touch-icon link at that moment. So the choice is made in the Safari tab, before
 // Share → Add to Home Screen, and only changes the link. Each design has its own file names: Safari
 // remembers icons by file name. The choice is remembered in this Safari tab only (a convenience).
-const HOME_ICONS = [
-  { id: 'gradient', name: 'Green gradient' },
-  { id: 'charcoal', name: 'Charcoal' },
-  { id: 'pattern', name: 'Gradient with pattern' },
-  { id: 'mint', name: 'Pattern with mint glow' },
-];
-const iconFile = id => `icon-sgh-${id}-180.png`;
+// 1.10.14: four backgrounds × two marks (SGH logo, clipboard & camera) = 8 icons. id = '<mark>-<background>'.
+const ICON_BGS = [['gradient', 'Green gradient'], ['charcoal', 'Charcoal'], ['pattern', 'Gradient with pattern'], ['mint', 'Pattern with mint glow']];
+const ICON_MARKS = [['sgh', 'SGH logo'], ['clip', 'Clipboard & camera']];
+const HOME_ICONS = ICON_MARKS.flatMap(([m, mn]) => ICON_BGS.map(([b, bn]) => ({ id: `${m}-${b}`, mark: m, markName: mn, name: bn })));
+const iconFile = id => `icon-${id}-180.png`;
 function chosenIcon() {
   let v = null; try { v = localStorage.getItem('sd-home-icon'); } catch (_) {}
-  return HOME_ICONS.some(x => x.id === v) ? v : 'gradient';
+  if (v && !v.includes('-')) v = 'sgh-' + v;   // choices saved by 1.10.13
+  return HOME_ICONS.some(x => x.id === v) ? v : 'sgh-gradient';
 }
 function applyHomeIcon(id) {
   const href = iconFile(id);
@@ -3466,7 +3465,7 @@ function openIconPicker() {
   openSheet({
     title: 'Home Screen icon',
     body: `<p class="note">Pick an icon, then tap <b>Share</b> (the square with an arrow) → <b>Add to Home Screen</b>. The preview there shows the icon you picked.</p>
-      <div class="icon-pick">${HOME_ICONS.map(x => `<button type="button" data-icon="${x.id}" aria-pressed="${x.id === cur}"><img alt="" src="${iconFile(x.id)}"><span>${esc(x.name)}</span></button>`).join('')}</div>
+      ${ICON_MARKS.map(([m, mn]) => `<h3 class="icon-pick-h">${esc(mn)}</h3><div class="icon-pick">${HOME_ICONS.filter(x => x.mark === m).map(x => `<button type="button" data-icon="${x.id}" aria-pressed="${x.id === cur}"><img alt="" src="${iconFile(x.id)}"><span>${esc(x.name)}</span></button>`).join('')}</div>`).join('')}
       <p class="note">The icon is fixed once the app is on the Home Screen. To change it later the app has to be removed and added again, and <b>removing it deletes every project and photo on the phone</b>, so only do that after everything is exported and combined.</p>`,
     mount(el, close) {
       el.querySelectorAll('[data-icon]').forEach(btn => btn.onclick = () => {

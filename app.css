@@ -537,3 +537,4 @@ video.pv-img { touch-action: auto; }
 .icon-pick button { border: 2px solid var(--line); border-radius: 16px; background: var(--paper); color: var(--ink); padding: 12px 8px; display: flex; flex-direction: column; align-items: center; gap: 8px; font: inherit; font-size: 14px; font-weight: 600; }
 .icon-pick button[aria-pressed=true] { border-color: var(--focus); box-shadow: 0 0 0 2px var(--focus); }
 .icon-pick img { width: 96px; height: 96px; border-radius: 21px; display: block; }
+.icon-pick-h { margin: 14px 0 0; font-size: 15px; }
