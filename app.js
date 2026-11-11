@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -1712,7 +1712,10 @@ async function onCamClick(e) {
   if (a === 'retry' || a === 'restart') { CAM.optsOpen = false; camUpdate(); return startStream(); }
   if (a === 'play') { const v = $('.cam-view', CAM.el); try { await v.play(); } catch (err) { camLog('tap play: ' + err.name); } if (v.videoWidth && !v.paused) camMsg(null); else startStream(); return; }
   if (a === 'opts') { CAM.optsOpen = !CAM.optsOpen; CAM.popOpen = null; return camUpdate(); }
-  if (a === 'night') { CAM.popOpen = CAM.popOpen === 'night' ? null : 'night'; CAM.optsOpen = false; return camUpdate(); }
+  if (a === 'night') {   // 1.12.1: each tap moves to the next setting: Off → 1 s → 2 s → 3 s → Off
+    S.settings.night = ((S.settings.night || 0) + 1) % 4; saveSettings();
+    toast(S.settings.night ? `Night mode: ${S.settings.night} s · hold still for each photo` : 'Night mode: Off'); return camUpdate();
+  }
   if (a === 'flashset') { S.settings.flash = b.dataset.v; saveSettings(); applyFlash(); return camUpdate(); }
   if (a === 'nightset') { S.settings.night = +b.dataset.v; saveSettings(); return camUpdate(); }
   if (a === 'mode') return switchMode(b.dataset.v);
@@ -1723,7 +1726,10 @@ async function onCamClick(e) {
   }
   if (a === 'torch') {
     if (CAM.track && !(CAM.caps && CAM.caps.torch)) { toast(CAM.lenses.length ? 'Flash isn’t available on this lens — try the 1× lens' : 'Flash isn’t available on this camera'); return; }
-    CAM.popOpen = CAM.popOpen === 'flash' ? null : 'flash'; CAM.optsOpen = false; return camUpdate();
+    // 1.12.1: each tap moves to the next setting: Off → Flash → Always on → Off
+    const order = ['off', 'flash', 'on'];
+    S.settings.flash = order[(order.indexOf(flashMode()) + 1) % order.length]; saveSettings(); applyFlash();
+    toast('Flash: ' + FLASH_LABEL[S.settings.flash] + (S.settings.flash === 'flash' ? ' (lights for each photo)' : '')); return camUpdate();
   }
   if (a === 'native') {
     S.settings.camera = 'native'; await saveSettings();
