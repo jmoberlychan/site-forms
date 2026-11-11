@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -899,6 +899,9 @@ async function addPhotos(files, linkDefectId, opts = {}) {
           const st = await stampPhoto(full, reSaved ? f : full, { takenAt: facts.shotAt || takenAt, geo, upright: reSaved || !!f._thumb, lens: f._lens, zoom: f._zoom, desc: photoDesc(unit, component, initials), artist: initials });
           full = st.blob; if (st.model) facts.model = st.model; if (st.shotAt) facts.shotAt = st.shotAt;
         } catch (e) { /* the photo is kept without the extra details rather than lost */ }
+        // 1.13.1: store the photo as one plain block of bytes. A photo pieced together from parts of other files (the
+        // camera's file plus the new details) is stored by iPhone Safari as references to those files, which can change.
+        full = new Blob([await full.arrayBuffer()], { type: 'image/jpeg' });
       }
       const dk = dateKey(takenAt);
       const seq = await nextSeq(initials, dk);
@@ -914,9 +917,7 @@ async function addPhotos(files, linkDefectId, opts = {}) {
       if (geo) meta.geo = { lat: geo.lat, lon: geo.lon, alt: geo.alt, acc: geo.acc, t: geo.t };
       if (facts.shotAt && Math.abs(facts.shotAt - takenAt) > 60000) meta.shotAt = facts.shotAt;   // a library photo taken earlier
       meta.device = facts.model || S.settings.deviceModel || 'iPhone';
-      // checksum for the ZIP. 1.12.0: built-in camera photos skip it here (it slowed every shot); it's worked out in the
-      // background after the camera closes (crcIdle), or at export at the latest.
-      if (!vid && !f._thumb) { meta.crc = await crcOfBlob(full); meta.crcSize = full.size; }
+      // checksum for the ZIP: 1.13.1 works it out from the stored copy, in the background (crcIdle) or at export.
       const d = await db(); const t = d.transaction(['photos', 'blobs', 'thumbs'], 'readwrite');
       t.objectStore('photos').put(meta); t.objectStore('blobs').put(full, meta.id); t.objectStore('thumbs').put(thumb, meta.id);
       await txDone(t);
@@ -928,7 +929,7 @@ async function addPhotos(files, linkDefectId, opts = {}) {
   busy(null);
   if (failed.length) rescueFiles(failed);
   if (!persistAsked && navigator.storage && navigator.storage.persist) { persistAsked = true; navigator.storage.persist().catch(() => {}); }
-  if (!CAM.el) geoStopSoon();
+  if (!CAM.el) { geoStopSoon(); setTimeout(crcIdle, 3000); }
   checkStorage();
   return added;
 }
@@ -1052,17 +1053,25 @@ async function deleteSessionPhoto(p, session) {
 const sessionOpts = session => ({ canDel: p => !!freshTail(p, session), del: p => deleteSessionPhoto(p, session) });
 // 1.12.0: ZIP checksums for built-in camera photos are worked out in quiet moments after the camera closes
 // (export still works them out for any photo that doesn't have one yet).
+// 1.13.1: every photo's checksum is worked out from the copy actually stored on the phone (crcV), never from the copy in
+// memory, so a ZIP can't carry a checksum that doesn't match its file. A photo whose stored copy differs from the
+// checksum recorded when it was saved is counted (Settings → Photo check) and exported with the right checksum.
 let crcRunning = false;
+const CRC_LOG = { checked: 0, differed: 0 };
+function noteCrc(p, c, size) {
+  if (p.crc != null && p.crcSize === size && p.crc !== c && !p.crcV) { p.crcWas = p.crc; CRC_LOG.differed++; }
+  p.crc = c; p.crcSize = size; p.crcV = 1; CRC_LOG.checked++;
+}
 async function crcIdle() {
   if (crcRunning || CAM.el || !S.project) return; crcRunning = true;
   try {
-    for (const p of S.photos.filter(x => !x.removed && !isVideo(x) && x.crc == null)) {
+    for (const p of S.photos.filter(x => !x.removed && !isVideo(x) && !x.crcV)) {
       if (CAM.el || document.hidden) break;
       const b = await get('blobs', p.id); if (!b) continue;
       const crc = await crcOfBlob(b);
-      if (photoById(p.id) !== p || p.crc != null) continue;   // deleted or changed meanwhile
-      p.crc = crc; p.crcSize = b.size; await savePhotoMeta(p);
-      await sleep(40);
+      if (photoById(p.id) !== p || p.crcV) continue;   // deleted or changed meanwhile
+      noteCrc(p, crc, b.size); await savePhotoMeta(p);
+      await sleep(30);
     }
   } catch (_) {} finally { crcRunning = false; }
 }
@@ -3638,6 +3647,7 @@ async function openSettings() {
       <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
         <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video)</option></select>
         <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
+      <div class="kv"><span>Photo check (stored copies)</span><span>${S.photos.filter(x => !x.removed && !isVideo(x) && x.crcV).length} of ${S.photos.filter(x => !x.removed && !isVideo(x)).length} checked${S.photos.some(x => x.crcWas != null) ? ` · <b class="warn">${S.photos.filter(x => x.crcWas != null).length} changed in storage (exported correctly from 1.13.1)</b>` : ''}</span></div>
       <div class="field"><label>Photo location</label><p class="note" style="margin:0">${GEO.err === 'denied' ? '<b class="warn">Off — photos don’t record where they were taken.</b> To turn it on: iPhone Settings → Privacy &amp; Security → Location Services → <b>Safari Websites</b> → <b>While Using the App</b>, with <b>Precise Location</b> on. Then close Site Defects (swipe it away) and open it again.' : GEO.fix ? `On · last reading ±${Math.round(GEO.fix.acc)} m, ${fmtTime(GEO.fix.t)}. Each photo records where it was taken.` : 'Each photo records where it was taken. The iPhone asks for permission the first time you take a photo: choose <b>Allow While Using App</b>.'}</p></div>
       <div class="field"><label for="s-model">This iPhone’s model (optional)</label><input id="s-model" value="${esc(S.settings.deviceModel || '')}" placeholder="e.g. iPhone 17 Pro" maxlength="40"><span class="hint">Written into each new photo’s details as the camera model. iOS doesn’t tell web apps which iPhone they’re on, so photos say just “iPhone” unless this is filled in (photos from the iPhone camera or ＋ Library keep the model iOS recorded).</span></div>
       <label class="check toggle-row"><input type="checkbox" id="s-camzoom"><span>Built-in camera keeps its zoom<span class="hint">On: the camera opens at the zoom you last used. Off: it always opens at 1×, like the iPhone Camera app.</span></span></label>
@@ -3794,12 +3804,20 @@ function openExport() {
 }
 /* ---------- ZIP writer: no compression, built from the stored files, ZIP64 above 4 GB ---------- */
 const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+// 1.13.1: the same checksum, worked out 8 bytes at a time (about 4× faster), so exports can afford to check every file
+const CRC_T8 = (() => { const T = new Uint32Array(8 * 256); T.set(CRC_T); for (let n = 0; n < 256; n++) for (let k = 1; k < 8; k++) { const p = T[(k - 1) * 256 + n]; T[k * 256 + n] = (p >>> 8) ^ T[p & 255]; } return T; })();
+function crcUpdate(c, u) {
+  const T = CRC_T8, n = u.length; let i = 0;
+  for (; i + 8 <= n; i += 8) {
+    const a = (c ^ (u[i] | (u[i + 1] << 8) | (u[i + 2] << 16) | (u[i + 3] << 24))) >>> 0, b = (u[i + 4] | (u[i + 5] << 8) | (u[i + 6] << 16) | (u[i + 7] << 24)) >>> 0;
+    c = T[1792 + (a & 255)] ^ T[1536 + ((a >>> 8) & 255)] ^ T[1280 + ((a >>> 16) & 255)] ^ T[1024 + (a >>> 24)] ^ T[768 + (b & 255)] ^ T[512 + ((b >>> 8) & 255)] ^ T[256 + ((b >>> 16) & 255)] ^ T[b >>> 24];
+  }
+  for (; i < n; i++) c = T[(c ^ u[i]) & 255] ^ (c >>> 8);
+  return c >>> 0;
+}
 async function crcOfBlob(blob) {
   let c = 0xFFFFFFFF; const CH = 8 * 1048576;
-  for (let o = 0; o < blob.size; o += CH) {
-    const u = new Uint8Array(await blob.slice(o, o + CH).arrayBuffer());
-    for (let i = 0; i < u.length; i++) c = CRC_T[(c ^ u[i]) & 255] ^ (c >>> 8);
-  }
+  for (let o = 0; o < blob.size; o += CH) c = crcUpdate(c, new Uint8Array(await blob.slice(o, o + CH).arrayBuffer()));
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 let ZIP64_AT = 0xFFFFFFFF;   // sizes/offsets at or above this use the ZIP64 fields (tests lower it)
@@ -3888,7 +3906,9 @@ async function exportRun({ photos, copies, withXls }) {
       const ph = j.photos[k]; const b = await get('blobs', ph.id);
       ph.zipPath = null;
       if (b) {
-        if (ph.crc == null || ph.crcSize !== b.size) { ph.crc = await crcOfBlob(b); ph.crcSize = b.size; await savePhotoMeta(ph); }
+        // 1.13.1: the ZIP's checksum must match the stored file exactly, or iOS refuses the ZIP ("Bad message").
+        // Only a checksum worked out from the stored copy itself (crcV) is trusted; anything else is worked out again here.
+        if (ph.crc == null || ph.crcSize !== b.size || !ph.crcV) { const c = await crcOfBlob(b); noteCrc(ph, c, b.size); await savePhotoMeta(ph); }
         if (copies !== 'o') { ph.zipPath = photoPath(ph); entries.push({ path: root + '/' + ph.zipPath, blob: b, crc: ph.crc, date: ph.takenAt }); }
         if (copies !== 'r') {
           entries.push({ path: root + '/Unsorted/Original names/' + origNameOf(ph), blob: b, crc: ph.crc, date: ph.takenAt });
