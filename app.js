@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.7';
+const APP_VERSION = '1.10.8';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -246,6 +246,32 @@ async function switchView(kind) {
   await saveProject(); render(); window.scrollTo(0, 0);
   if (!st.unit) pickUnit(kind);
 }
+// Schedule cell -> sortable number, or null if it isn't a date (1.10.8 adds the optional day name and time).
+// Same scale as before (ms / 1e8), so files that use plain dates sort exactly as they did.
+function schedDateTime(t, now = new Date()) {
+  let s = String(t || '').trim().replace(/^(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.?,?\s+/i, '');
+  let y, mo, d, m;
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s]+|$)/))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})(?:[\/.\-](\d{2}|\d{4}))?(?:,?\s+|$)/))) {
+    mo = +m[1]; d = +m[2];
+    if (m[3]) { y = +m[3]; if (y < 100) y += 2000; }
+    else {   // no year: this year, unless that date is more than 6 months ago (then next year)
+      y = now.getFullYear();
+      if (Date.UTC(y, mo - 1, d) < Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - 182 * 864e5) y++;
+    }
+  } else return null;
+  if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
+  const rest = s.slice(m[0].length).trim();
+  let h = 0, mi = 0;
+  if (rest) {
+    const tm = rest.match(/^(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*([ap])?\.?\s*m?\.?$/i);
+    if (!tm) return null;
+    h = +tm[1]; mi = +(tm[2] || 0);
+    if (tm[3]) { if (h === 12) h = 0; if (/p/i.test(tm[3])) h += 12; }
+    if (h > 23 || mi > 59) return null;
+  }
+  return Date.UTC(y, mo - 1, d, h, mi) / 1e8;
+}
 // Units in working order: scheduled units first (by schedule), then everything else in list order.
 // kind: 'unit' or 'building' (default: units).
 function unitsInOrder(kind = 'unit') {
@@ -342,11 +368,10 @@ function parseWorkbook(wb, fileName) {
     const t = String(raw ?? '').trim(); if (!t) return null;
     const n = Number(t.replace(/[^0-9.\-]/g, ''));
     if (/^[#\s]*-?\d+(\.\d+)?$/.test(t)) return n;
-    // a visit date (m/d/yy, m/d/yyyy or yyyy-mm-dd), parsed by hand so every phone reads it the same: earlier first
-    let m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/), y, mo, d;
-    if (m) { mo = +m[1]; d = +m[2]; y = +m[3]; if (y < 100) y += 2000; }
-    else if ((m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
-    if (m && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return Date.UTC(y, mo - 1, d) / 1e8;
+    // a visit date, with or without a day name and a time (1.10.8): "Mon 11/16 8:00 AM", "11/16/2026 1:30PM",
+    // "2026-11-16 13:30", "11/16/26". Parsed by hand so every phone reads it the same: earliest first.
+    const dt = schedDateTime(t);
+    if (dt != null) return dt;
     return 1e6 + rowIdx;  // anything else ("x", "yes", "9:30 AM"…): scheduled, in sheet order, showing the text
   };
   let units = [];
@@ -3287,7 +3312,7 @@ function shareStep(steps) {
 /* ================= Template + demo ================= */
 function templateWorkbook() {
   const wb = XLSX.utils.book_new();
-  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '267180.00'], ['Project Name', 'Example Condominiums'], ['Roofs', 'By unit'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Number units in the Schedule column (1, 2, 3…) to put them first, in visit order. Leave it blank for units not on the schedule.'],
+  const proj = XLSX.utils.aoa_to_sheet([['Project Number', '267180.00'], ['Project Name', 'Example Condominiums'], ['Roofs', 'By unit'], [], ['Fill in the Units and Defects sheets, then import this file in the app.'], ['Schedule column: the visit day and time (e.g. Mon 11/16 8:00 AM, or an Excel date and time), or a number (1, 2, 3…). Scheduled units come first, earliest first, and the app shows the day and time. Leave it blank for units not on the schedule.'],
     ['Roofs: “By unit” records the Roof component at each unit. “By building” records it at buildings instead: list the buildings on the Buildings sheet (in the order to show them). Units then don’t offer Roof, and buildings offer only Roof.']]);
   proj['!cols'] = [{ wch: 18 }, { wch: 40 }];
   proj.B1.z = '@';   // text, so Excel keeps 267180.00 instead of turning it into 267180
