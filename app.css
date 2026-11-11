@@ -529,3 +529,11 @@ video.pv-img { touch-action: auto; }
 .tsz-m .thumbs .badge, .tsz-l .thumbs .badge { font-size: 13px; }
 .tsz-l .zoom-ic, .tsz-m .zoom-ic { width: 34px; height: 34px; line-height: 34px; font-size: 19px; }
 #t-all, #t-move, #t-link { flex: 1 1 0; min-width: 0; padding-left: 6px; padding-right: 6px; white-space: nowrap; }
+
+/* 1.10.13: Home Screen icon choice (Safari tab only) */
+.bb-icon { margin-top: 6px; display: inline-flex; align-items: center; gap: 8px; border: 0; border-radius: 999px; background: rgba(0,0,0,.85); color: #fff; font: inherit; font-size: 14px; padding: 4px 12px 4px 4px; }
+.bb-icon img { width: 26px; height: 26px; border-radius: 6px; display: block; }
+.icon-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.icon-pick button { border: 2px solid var(--line); border-radius: 16px; background: var(--paper); color: var(--ink); padding: 12px 8px; display: flex; flex-direction: column; align-items: center; gap: 8px; font: inherit; font-size: 14px; font-weight: 600; }
+.icon-pick button[aria-pressed=true] { border-color: var(--focus); box-shadow: 0 0 0 2px var(--focus); }
+.icon-pick img { width: 96px; height: 96px; border-radius: 21px; display: block; }

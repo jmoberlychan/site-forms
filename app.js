@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.10.12';
+const APP_VERSION = '1.10.13';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -3430,10 +3430,57 @@ function showBrowserBanner() {
   if (isStandalone() || document.getElementById('in-browser')) return;
   const b = document.createElement('div'); b.id = 'in-browser'; b.className = 'browser-banner'; b.setAttribute('role', 'note');
   b.textContent = 'You’re in Safari, not the Site Defects app — data here is separate.';
+  // 1.10.13: choose the Home Screen icon before adding the app to the Home Screen
+  const ic = document.createElement('button'); ic.type = 'button'; ic.className = 'bb-icon'; ic.onclick = openIconPicker;
+  ic.innerHTML = `<img alt="" src="${iconFile(chosenIcon())}"> Choose Home Screen icon ›`;
+  b.appendChild(document.createElement('br')); b.appendChild(ic);
   document.body.prepend(b); document.documentElement.classList.add('in-browser');
   const fit = () => document.documentElement.style.setProperty('--bb-h', b.offsetHeight + 'px');
   fit(); addEventListener('resize', fit);
 }
+// Home Screen icon choice (1.10.13). iPhone saves a web app's icon once, when it's added to the Home Screen,
+// from the page's apple-touch-icon link at that moment. So the choice is made in the Safari tab, before
+// Share → Add to Home Screen, and only changes the link. Each design has its own file names: Safari
+// remembers icons by file name. The choice is remembered in this Safari tab only (a convenience).
+const HOME_ICONS = [
+  { id: 'gradient', name: 'Green gradient' },
+  { id: 'charcoal', name: 'Charcoal' },
+  { id: 'pattern', name: 'Gradient with pattern' },
+  { id: 'mint', name: 'Pattern with mint glow' },
+];
+const iconFile = id => `icon-sgh-${id}-180.png`;
+function chosenIcon() {
+  let v = null; try { v = localStorage.getItem('sd-home-icon'); } catch (_) {}
+  return HOME_ICONS.some(x => x.id === v) ? v : 'gradient';
+}
+function applyHomeIcon(id) {
+  const href = iconFile(id);
+  let l = document.querySelector('link[rel="apple-touch-icon"]');
+  if (!l) { l = document.createElement('link'); l.rel = 'apple-touch-icon'; document.head.appendChild(l); }
+  l.setAttribute('href', href); l.setAttribute('sizes', '180x180');
+  const f = document.querySelector('link[rel="icon"]'); if (f) f.setAttribute('href', href);
+  const bi = document.querySelector('.bb-icon img'); if (bi) bi.src = href;
+}
+function openIconPicker() {
+  const cur = chosenIcon();
+  openSheet({
+    title: 'Home Screen icon',
+    body: `<p class="note">Pick an icon, then tap <b>Share</b> (the square with an arrow) → <b>Add to Home Screen</b>. The preview there shows the icon you picked.</p>
+      <div class="icon-pick">${HOME_ICONS.map(x => `<button type="button" data-icon="${x.id}" aria-pressed="${x.id === cur}"><img alt="" src="${iconFile(x.id)}"><span>${esc(x.name)}</span></button>`).join('')}</div>
+      <p class="note">The icon is fixed once the app is on the Home Screen. To change it later the app has to be removed and added again, and <b>removing it deletes every project and photo on the phone</b>, so only do that after everything is exported and combined.</p>`,
+    mount(el, close) {
+      el.querySelectorAll('[data-icon]').forEach(btn => btn.onclick = () => {
+        const id = btn.dataset.icon;
+        try { localStorage.setItem('sd-home-icon', id); } catch (_) {}
+        applyHomeIcon(id);
+        el.querySelectorAll('[data-icon]').forEach(o => o.setAttribute('aria-pressed', String(o === btn)));
+        toast('Icon chosen. Now tap Share → Add to Home Screen');
+        setTimeout(close, 500);
+      });
+    }
+  });
+}
+if (!isStandalone()) applyHomeIcon(chosenIcon());
 showBrowserBanner();
 
 // Photos 2+ days old that no PC receipt has confirmed yet: remind once a day, so they're sent before the phone fills up.
