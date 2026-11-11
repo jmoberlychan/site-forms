@@ -2,7 +2,7 @@
    All data lives on the device in IndexedDB. Nothing is sent anywhere. */
 'use strict';
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.11.1';
 const RESULTS = ['1', '0', 'NA', 'NR'];
 const GENERAL = '_general';
 const isGeneral = id => String(id).startsWith(GENERAL);
@@ -822,8 +822,16 @@ async function thumbSrc(id) {
   const b = await get('thumbs', id); if (!b) return '';
   const u = URL.createObjectURL(b); thumbURL.set(id, u); return u;
 }
+// 1.11.1: at Medium and Large a tile takes the photo's own shape (portrait or landscape). Each thumbnail's shape is
+// remembered once it has loaded, so the tile is the right shape straight away the next time it's drawn.
+const thumbDim = new Map();
 function hydrateThumbs(root) {
-  root.querySelectorAll('img[data-thumb]').forEach(async img => { const s = await thumbSrc(img.dataset.thumb); if (s) img.src = s; });
+  root.querySelectorAll('img[data-thumb]').forEach(async img => {
+    const id = img.dataset.thumb, d = thumbDim.get(id);
+    img.width = d ? d[0] : 1; img.height = d ? d[1] : 1;
+    if (!d) img.addEventListener('load', () => { if (img.naturalWidth) { thumbDim.set(id, [img.naturalWidth, img.naturalHeight]); img.width = img.naturalWidth; img.height = img.naturalHeight; } }, { once: true });
+    const s = await thumbSrc(id); if (s) img.src = s;
+  });
 }
 function thumbHTML(p, opts = {}) {
   const sel = opts.selectable && S.selecting.has(p.id);
@@ -947,7 +955,7 @@ function requireContext() {
   return true;
 }
 
-/* ================= Built-in camera (trial) — iOS-style layout, v1.4.1 =================
+/* ================= Built-in camera — iOS-style layout, v1.4.1 =================
    Live viewfinder with rapid capture (no "Use Photo" step). Laid out like the iPhone Camera app:
    flash top-left, options chevron top-centre, zoom buttons on the viewfinder, VIDEO / PHOTO above the shutter,
    last capture bottom-left. What iOS lets a web app control: lens switching (0.5× / 1× / telephoto),
@@ -1607,7 +1615,7 @@ async function onCamClick(e) {
   }
   if (a === 'native') {
     S.settings.camera = 'native'; await saveSettings();
-    await closeCamera(false); toast('Switched to the iPhone camera (change it in Menu → Camera)');
+    await closeCamera(false); toast('Switched to the iPhone camera (turn Built-in camera back on in the Menu)');
     pendingCapture = { defectId: batch ? batch.defectId : null }; const inp = $('#cam-input'); inp.value = ''; inp.click();
     return;
   }
@@ -1723,7 +1731,18 @@ function openSheet({ title, body, foot, mount, onClose, modal }) {
     <div class="sheet-head"><h2>${esc(title)}</h2><button class="close" data-close>Done</button></div>
     <div class="sheet-body">${body || ''}</div>${foot ? `<div class="sheet-foot">${foot}</div>` : ''}</div>`;
   $('#sheet-root').appendChild(scrim); sheetStack++;
-  const close = () => { if (!scrim.isConnected) return; scrim.remove(); sheetStack--; onClose && onClose(); };
+  document.documentElement.classList.add('sheet-open');   // 1.11.1: the page behind can't scroll while a panel is open
+  const close = () => { if (!scrim.isConnected) return; scrim.remove(); sheetStack--; if (sheetStack <= 0) { sheetStack = 0; document.documentElement.classList.remove('sheet-open'); } onClose && onClose(); };
+  // a drag that starts on the dimmed background, or on a part of the panel that doesn't scroll, mustn't move the page
+  scrim.addEventListener('touchmove', e => {
+    if (e.touches.length > 1) return;
+    for (let n = e.target; n && n !== scrim; n = n.parentElement) {
+      if (n.matches('input[type="range"]')) return;
+      const st = getComputedStyle(n);
+      if ((/(auto|scroll)/.test(st.overflowY) && n.scrollHeight > n.clientHeight + 1) || (/(auto|scroll)/.test(st.overflowX) && n.scrollWidth > n.clientWidth + 1)) return;
+    }
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
   // modal panels ignore taps outside them (they close only with their own buttons)
   scrim.addEventListener('click', e => { if ((e.target === scrim && !modal) || e.target.closest('[data-close]')) close(); });
   mount && mount(scrim, close);
@@ -2163,7 +2182,7 @@ function linkSheet(photos, fresh) {
       el.addEventListener('change', e => { if (e.target.id === 'ls-multi') { multi = e.target.checked; S.settings.linkMulti = multi; saveSettings(); } });
       el.addEventListener('click', async e => {
         if (dragJustEnded()) return;
-        if (sizeClick(e, body)) return;
+        if (sizeClick(e, body)) { draw(el); return; }
         if (e.target.closest('#again')) { close(); capture(null); return; }
         if (e.target.closest('#ls-all')) { if (sel.size === photos.length) sel.clear(); else photos.forEach(p => sel.add(p.id)); draw(el); return; }
         if (e.target.closest('#ls-rest')) { sel.clear(); photos.filter(p => !p.defectIds.length).forEach(p => sel.add(p.id)); draw(el); return; }
@@ -2215,7 +2234,7 @@ function openTray() {
       dragSelect($('.sheet-body', el), 'photo', id => S.selecting.has(id), (id, on) => { on ? S.selecting.add(id) : S.selecting.delete(id); }, () => draw(el));
       el.addEventListener('click', async e => {
         if (dragJustEnded()) return;
-        if (sizeClick(e, $('.sheet-body', el))) return;
+        if (sizeClick(e, $('.sheet-body', el))) { draw(el); return; }
         const t = e.target.closest('[data-photo]');
         const z = e.target.closest('[data-zoom]');
         if (z) { const ps = trayPhotos(); previewPhotos(ps.map(x => x.id), ps.findIndex(x => x.id === z.dataset.zoom), { isSel: id => S.selecting.has(id), toggle: id => { S.selecting.has(id) ? S.selecting.delete(id) : S.selecting.add(id); draw(el); } }); return; }
@@ -2299,7 +2318,7 @@ function missingList() {
 function missingSheet() {
   const list = missingList();
   openSheet({
-    title: 'Defective, no photo',
+    title: 'Defective conditions missing photos',
     body: list.length ? `<p class="note">${list.length} condition${list.length > 1 ? 's are' : ' is'} marked 1 with no photo linked. Tap one to go to it.</p>
       <ul class="list">${list.map((m, i) => `<li><button data-mi="${i}"><span><b>${kindWord(m.unit)} ${esc(m.unit)}</b><span class="sub">${esc(m.d.component)}${m.d.item ? ' · ' + esc(itemLabel(m.unit, m.d.component, m.d.item)) : ''} · ${m.d.code ? esc(m.d.code) + ' ' : ''}${esc(m.d.label)}</span></span><span class="meta">›</span></button></li>`).join('')}</ul>`
       : '<p>Every defective condition has a photo linked.</p>',
@@ -2723,7 +2742,7 @@ function render() {
     </header>
     <main id="list"></main>
     <nav class="bar">
-      <div class="bar-top">${stepperHTML()}</div>
+      <div class="bar-top"><button class="lib-btn" id="lib" aria-label="Add photos and videos from library">＋ Library</button>${stepperHTML()}</div>
       <button class="side" id="tray">Unlinked<span class="n" id="tray-n">0</span></button>
       <button class="shutter" id="shoot" aria-label="Take photo"><span>Photo</span></button>
       <button class="side" id="export">Export</button>
@@ -2736,6 +2755,7 @@ function render() {
   $('#next').onclick = () => stepUnit(1);
   $('#shoot').onclick = () => capture(null);
   $('#tray').onclick = openTray;
+  $('#lib').onclick = fromLibrary;
   $('#export').onclick = openExport;
   renderList(); renderProgress();
 }
@@ -2971,7 +2991,7 @@ function attachToDefect(defectId) {
         hydrateThumbs(grid); $('#go', el).disabled = !chosen.size; $('#go', el).textContent = 'Link' + (chosen.size ? ' ' + chosen.size : '');
       };
       draw();
-      applyThumbSize($('.sheet-body', el)); $('.sheet-body', el).addEventListener('click', e => sizeClick(e, $('.sheet-body', el)));
+      applyThumbSize($('.sheet-body', el)); $('.sheet-body', el).addEventListener('click', e => { if (sizeClick(e, $('.sheet-body', el))) draw(); });
       dragSelect(grid, 'pick', id => chosen.has(id), (id, on) => { on ? chosen.add(id) : chosen.delete(id); }, () => draw());
       grid.onclick = e => {
         if (dragJustEnded()) return;
@@ -3008,24 +3028,30 @@ function renderWelcome(app) {
 }
 function pageVersion() { const m = document.querySelector('meta[name="app-version"]'); return m ? m.content : ''; }
 function openMenu() {
+  const miss = missingList().length;
+  const camLine = () => S.settings.camera === 'builtin' ? 'On · photos are taken with the app’s built-in camera' : 'Off · photos are taken with the iPhone camera';
   openSheet({
     title: 'Menu',
     body: `<ul class="list">
       <li><button id="m-proj"><span>Projects<span class="sub">${S.projects.length} on this phone · switch, import, update lists</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-miss"${miss ? ' class="alert"' : ''}><span>Defective conditions missing photos<span class="sub">${miss ? miss + ' condition' + (miss > 1 ? 's' : '') + ' marked 1 with no photo linked' : 'Every defective condition has a photo'}</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-cam" role="switch" aria-checked="${S.settings.camera === 'builtin'}"><span>Built-in camera<span class="sub" id="m-cam-sub">${camLine()}</span></span><span class="switch" aria-hidden="true"></span></button></li>
       <li><button id="m-lib"><span>Add photos &amp; videos from library<span class="sub">Import photos or videos you took with the Camera app into ${esc(S.project.state.unit || 'the current unit')}</span></span><span class="meta">›</span></button></li>
-      <li><button id="m-cam"><span>Camera: ${S.settings.camera === 'builtin' ? 'Built-in (trial)' : 'iPhone camera'}<span class="sub">Tap to switch to ${S.settings.camera === 'builtin' ? 'the iPhone camera' : 'the built-in camera'}</span></span><span class="meta">⇄</span></button></li>
       <li><button id="m-lists"><span>Edit lists<span class="sub">Add units, components and conditions · delete ones added on site</span></span><span class="meta">›</span></button></li>
-      <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
-      <li><button id="m-miss"><span>Defective, no photo<span class="sub">${missingList().length ? missingList().length + ' condition' + (missingList().length > 1 ? 's' : '') + ' marked 1 with no photo linked' : 'Every defective condition has a photo'}</span></span><span class="meta">›</span></button></li>
-      <li><button id="m-rcv"><span>Load PC receipt<span class="sub">From the PC combine tool · lets the app clear confirmed photos automatically</span></span><span class="meta">›</span></button></li>
-      <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
       <li><button id="m-tpl"><span>Get the Excel template</span><span class="meta">›</span></button></li>
+      <li><button id="m-rcv"><span>Load PC receipt<span class="sub">From the PC combine tool · lets the app clear confirmed photos automatically</span></span><span class="meta">›</span></button></li>
+      <li><button id="m-export"><span>Export spreadsheet &amp; photos</span><span class="meta">›</span></button></li>
+      <li><button id="m-set"><span>Settings &amp; storage<span class="sub">Initials ${esc(S.settings.initials)} · photo size · free up space</span></span><span class="meta">›</span></button></li>
     </ul><p class="note" style="margin-top:14px">Version ${APP_VERSION}${pageVersion() && pageVersion() !== APP_VERSION ? ` <b class="warn">(page ${esc(pageVersion())} — files out of step: re-upload all app files)</b>` : ''}. Data is stored only on this phone. Export regularly as a backup.</p>`,
     mount(el, close) {
       $('#m-proj', el).onclick = () => { close(); openProjects(); };
       $('#m-lib', el).onclick = () => { close(); fromLibrary(); };
       $('#m-lists', el).onclick = () => { close(); editListsSheet(); };
-      $('#m-cam', el).onclick = async () => { S.settings.camera = S.settings.camera === 'builtin' ? 'native' : 'builtin'; await saveSettings(); close(); toast(S.settings.camera === 'builtin' ? 'Camera: built-in (trial)' : 'Camera: iPhone camera'); };
+      // a switch: the menu stays open and shows which camera is in use
+      $('#m-cam', el).onclick = async () => {
+        S.settings.camera = S.settings.camera === 'builtin' ? 'native' : 'builtin'; await saveSettings();
+        $('#m-cam', el).setAttribute('aria-checked', S.settings.camera === 'builtin'); $('#m-cam-sub', el).textContent = camLine();
+      };
       $('#m-export', el).onclick = () => { close(); openExport(); };
       $('#m-miss', el).onclick = () => { close(); missingSheet(); };
       $('#m-rcv', el).onclick = () => { close(); loadReceipt(); };
@@ -3077,7 +3103,7 @@ async function openSettings() {
     body: `<div class="field"><label for="s-ini">Your initials</label><input id="s-ini" value="${esc(S.settings.initials)}" maxlength="5" autocapitalize="characters"><span class="hint">Used in new photo names. Existing photos keep their names.</span></div>
       <label class="check toggle-row"><input type="checkbox" id="s-lockzoom"><span>Lock screen zoom<span class="hint">Stops pinch and double-tap from zooming the screen in or out. Turn off if you need to zoom the screen. The camera’s own zoom always works.</span></span></label>
       <div class="field"><label for="s-cam">Camera</label><select id="s-cam">
-        <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video) — trial</option></select>
+        <option value="native">iPhone camera (full photo quality)</option><option value="builtin">Built-in camera (rapid shots, sharper video)</option></select>
         <span class="hint">Built-in camera: keep tapping the shutter with no “Use Photo” step. Photos are limited to the camera feed’s resolution (about 8 MP); video is recorded at the quality below.</span></div>
       <div class="field"><label for="s-vq">Built-in camera video quality</label><select id="s-vq">
         <option value="1080">1080p · about 90 MB per minute</option><option value="4k">4K · about 190 MB per minute</option></select></div>
