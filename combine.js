@@ -1,15 +1,22 @@
 /* Site Defects – Combine (PC). Unpacks export ZIPs into one folder per project, keeps each inspector's newest
    spreadsheet, builds "<project> Combined Defects.xlsx" (conflicts left blank + highlighted, resolutions kept
    between runs, everyone's change logs merged) and writes the receipt the phones use to clear space.
-   Uses the browser's folder access (Edge / Chrome). Nothing is uploaded anywhere. */
+   Uses the browser's folder access (Edge / Chrome). Nothing is uploaded anywhere.
+   1.15.0: copies several photos at once, lists each folder once, looks through the project's photos once, shows the
+   time left, can be paused and resumed (also after closing the tab or losing the connection), keeps the PC awake. */
 'use strict';
 const $ = s => document.querySelector(s);
 const RESULTS = ['1', '0', 'NA', 'NR'];
 
-/* ---------------- remembered folders ---------------- */
-const hdb = new Promise((res, rej) => { const r = indexedDB.open('site-defects-combine', 1); r.onupgradeneeded = () => r.result.createObjectStore('h'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-async function hget(k) { const d = await hdb; return new Promise(r => { const q = d.transaction('h').objectStore('h').get(k); q.onsuccess = () => r(q.result || null); q.onerror = () => r(null); }); }
-async function hset(k, v) { const d = await hdb; return new Promise(r => { const t = d.transaction('h', 'readwrite'); v == null ? t.objectStore('h').delete(k) : t.objectStore('h').put(v, k); t.oncomplete = () => r(); t.onerror = () => r(); }); }
+/* ---------------- remembered folders, and how far unfinished combines got ---------------- */
+// "site-defects-combine": the chosen folders and a note about an unfinished combine (kept at version 1, so rolling
+// back to an earlier Combine page still opens it). "site-defects-combine-progress" (1.15.0): for each ZIP (name, size,
+// date) a bit per file inside it, set once that file is safely in the project folder, so a combine that was paused,
+// closed or cut off carries on where it stopped instead of checking every photo again.
+const openDb = (name, store) => new Promise((res, rej) => { const r = indexedDB.open(name, 1); r.onupgradeneeded = () => r.result.createObjectStore(store); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const DBS = { h: openDb('site-defects-combine', 'h'), done: openDb('site-defects-combine-progress', 'done') };
+async function hget(k, store = 'h') { const d = await DBS[store]; return new Promise(r => { const q = d.transaction(store).objectStore(store).get(k); q.onsuccess = () => r(q.result || null); q.onerror = () => r(null); }); }
+async function hset(k, v, store = 'h') { const d = await DBS[store]; return new Promise(r => { const t = d.transaction(store, 'readwrite'); v == null ? t.objectStore(store).delete(k) : t.objectStore(store).put(v, k); t.oncomplete = () => r(); t.onerror = () => r(); }); }
 const H = { zip: null, dest: null, rcpt: null };
 async function permit(h, mode) {
   if (!h) return false;
@@ -22,7 +29,7 @@ function showChosen() {
     const el = $('#' + id); el.textContent = H[k] ? H[k].name : 'Not chosen'; el.classList.toggle('empty', !H[k]);
   }
   $('#zipClear').classList.toggle('hidden', !H.zip); $('#rcptClear').classList.toggle('hidden', !H.rcpt);
-  $('#go').disabled = !H.dest;
+  showButtons();
 }
 async function pick(k, mode) {
   try { const h = await showDirectoryPicker({ id: 'sd-' + k, mode }); H[k] = h; await hset(k, h); showChosen(); }
@@ -32,10 +39,110 @@ async function pick(k, mode) {
 /* ---------------- log + progress ---------------- */
 function log(t, cls) { const el = $('#log'); el.classList.remove('hidden'); const s = document.createElement('div'); if (cls) s.className = cls; s.textContent = t; el.appendChild(s); el.scrollTop = el.scrollHeight; }
 function status(t) { $('#status').textContent = t; }
-function progress(f) { $('#bar span').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; }
+function detail(t) { $('#detail').textContent = t; }
+function progress(f) { $('#bar span').style.width = (Math.max(0, Math.min(1, f)) * 100).toFixed(1) + '%'; }
 const mb = n => n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' GB' : (n / 1048576).toFixed(1) + ' MB';
+const num = n => Math.round(n).toLocaleString('en-US');
+const dur = s => { s = Math.round(s); if (s < 60) return 'less than a minute'; const m = Math.round(s / 60); if (m < 60) return m + ' min'; const h = Math.floor(m / 60), r = m % 60; return h + ' hr' + (r ? ' ' + r + ' min' : ''); };
 const stamp = t => { const d = new Date(t), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; };
 const safeName = s => String(s).replace(/[\\/:*?"<>|#%]+/g, '-').replace(/\s+/g, ' ').trim().replace(/^\.+/, '') || 'Unnamed';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------------- pause / resume, lost connections, keeping the PC awake (1.15.0) ---------------- */
+const C = { running: false, paused: false, why: '', waiters: [], active: 0, wake: null, t0: 0 };
+// every step that touches a folder waits here while paused
+function gate() { return C.paused ? new Promise(r => C.waiters.push(r)) : Promise.resolve(); }
+function showButtons() {
+  const go = $('#go'), pz = $('#pause');
+  go.textContent = C.running ? (C.paused ? 'Resume' : 'Combine') : (S0.unfinished ? 'Resume' : 'Combine');
+  go.disabled = C.running ? !C.paused : !H.dest;
+  pz.classList.toggle('hidden', !C.running || C.paused);
+  for (const id of ['zipPick', 'destPick', 'rcptPick', 'zipClear', 'rcptClear']) $('#' + id).disabled = C.running;
+  $('#resumeNote').classList.toggle('hidden', C.running || !S0.unfinished);
+}
+async function pauseNow(why) {
+  if (C.paused || !C.running) return;
+  C.paused = true; C.why = why || '';
+  P.samples = [];
+  releaseWake(); showButtons(); tick();
+  log(why ? 'Paused: ' + why : 'Pausing… (the photos being copied right now are finished first)', 'warn');
+  await flushDone(); await saveSession();
+}
+async function resumeNow() {
+  if (!C.paused) return;
+  // a click: the browser may ask again for permission to the folders (it can lapse after a while, or a reconnect)
+  if (!await permit(H.dest, 'readwrite')) { log('Permission to write to the project folder was not given. Click Resume to try again.', 'err'); return; }
+  if (H.zip && !await permit(H.zip, 'read')) { log('Permission to read the ZIP folder was not given. Click Resume to try again.', 'err'); return; }
+  C.paused = false; C.why = ''; log('Resumed.', 'h');
+  keepAwake(); showButtons();
+  const w = C.waiters; C.waiters = []; w.forEach(f => f());
+}
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && !C.wake && document.visibilityState === 'visible') { C.wake = await navigator.wakeLock.request('screen'); C.wake.addEventListener('release', () => { C.wake = null; }); } } catch (_) {}
+}
+function releaseWake() { try { if (C.wake) C.wake.release(); } catch (_) {} C.wake = null; }
+document.addEventListener('visibilitychange', () => { if (C.running && !C.paused) keepAwake(); });
+window.addEventListener('beforeunload', e => { if (C.running && !C.paused) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('pagehide', () => { if (C.running) { flushDone(); saveSession(); } });
+
+// Folder errors: one quick retry; then, if the folders can't be reached at all (network drive, VPN or USB drive gone),
+// pause until Resume and try the same step again. If the folders are fine, it's this one file: report it as before.
+const isFsErr = e => e instanceof DOMException && !['AbortError', 'TypeMismatchError', 'SyntaxError'].includes(e.name);
+async function reachable() {
+  try { for await (const _ of H.dest.keys()) break; if (H.zip) for await (const _ of H.zip.keys()) break; return true; } catch (_) { return false; }
+}
+async function withConn(fn, what) {
+  for (let tries = 0; ; tries++) {
+    await gate();
+    C.active++;
+    let err;
+    try { return await fn(); } catch (e) { err = e; } finally { C.active--; }
+    if (!isFsErr(err)) throw err;
+    if (err.name === 'QuotaExceededError') { await pauseNow(`the drive is full (while writing ${what}). Free up space on it, then click Resume.`); tries = -1; continue; }
+    if (tries === 0) { await sleep(2000); continue; }
+    if (await reachable()) throw err;
+    await pauseNow(`the folders can’t be reached (${String(err.message || err.name).replace(/\.$/, '')}). Check the connection (the I: drive, VPN or USB drive), then click Resume. Nothing is lost.`);
+    tries = -1;
+  }
+}
+
+/* ---------------- time remaining (1.15.0) ---------------- */
+// P: the step under way. done/total in bytes (copying) or files (checking), sampled every second over the last
+// minute: files already copied by an earlier run are counted as done from the start (so they don't make the
+// estimate look too quick), and paused time is left out (so it doesn't look too slow).
+const P = { step: '', label: '', kind: 'bytes', total: 0, done: 0, work: 0, files: 0, filesTotal: 0, samples: [] };
+const S0 = { unfinished: null };
+function phase(o) { Object.assign(P, { kind: 'bytes', total: 0, done: 0, work: 0, files: 0, filesTotal: 0, samples: [] }, o); tick(); }
+function rate() {
+  const s = P.samples; if (s.length < 2) return 0;
+  const dt = (s[s.length - 1][0] - s[0][0]) / 1000, dw = s[s.length - 1][1] - s[0][1];
+  return dt >= 6 && dw > 0 ? dw / dt : 0;
+}
+function tick() {
+  if (!C.running) return;
+  const now = Date.now();
+  if (!C.paused && C.active >= 0) { P.samples.push([now, P.done]); while (P.samples.length > 2 && now - P.samples[0][0] > 60000) P.samples.shift(); }
+  const r = rate(), left = Math.max(0, P.total - P.done);
+  const what = P.kind === 'bytes'
+    ? `${num(P.files)} of ${num(P.filesTotal)} files · ${mb(P.done)} of ${mb(P.total)}${r ? ` · ${mb(r)}/s` : ''}`
+    : P.total ? `${num(P.done)} of about ${num(P.total)} files` : `${num(P.done)} files so far`;
+  const eta = !P.total ? '' : r ? ` · ${left / r < 60 ? 'less than a minute' : 'about ' + dur(left / r)} left` : P.done < P.total ? ' · working out the time left…' : '';
+  if (C.paused) {
+    status(C.active ? 'Pausing…' : 'Paused');
+    detail(C.active ? `Finishing the ${C.active} file${C.active === 1 ? '' : 's'} being copied right now…`
+      : `${P.step ? P.step + ': ' : ''}${what}. Click Resume to carry on. You can also close this tab: clicking Combine later, with the same folders, carries on where it stopped.`);
+  } else {
+    status(P.step || 'Working…');
+    detail(P.label ? `${P.label}${P.label && what ? ': ' : ''}${P.total || P.done ? what + eta : ''}` : '');
+  }
+  if (P.total) progress(P.done / P.total);
+}
+setInterval(tick, 1000);
+setInterval(() => { if (C.running) { flushDone(); saveSession(); } }, 5000);
+async function saveSession() {
+  if (!C.running) return;
+  await hset('unfinished', { at: Date.now(), dest: H.dest && H.dest.name, zip: H.zip && H.zip.name, files: P.kind === 'bytes' ? P.files : null, filesTotal: P.kind === 'bytes' ? P.filesTotal : null, step: P.step });
+}
 
 /* ---------------- reading ZIPs (stored or deflated, ZIP64) without loading them into memory ---------------- */
 async function readZip(file) {
@@ -91,22 +198,7 @@ async function entryStream(file, en) {
 }
 
 /* ---------------- folder helpers ---------------- */
-async function subdir(root, parts, cache) {
-  let h = root, key = '';
-  for (const part of parts) {
-    key += '/' + part;
-    if (cache.has(key)) { h = cache.get(key); continue; }
-    h = await h.getDirectoryHandle(part, { create: true }); cache.set(key, h);
-  }
-  return h;
-}
 async function fileIfExists(dir, name) { try { return await (await dir.getFileHandle(name)).getFile(); } catch (_) { return null; } }
-async function writeBlob(dir, name, blob) {
-  const fh = await dir.getFileHandle(name, { create: true });
-  const w = await fh.createWritable();
-  try { await w.write(blob); await w.close(); } catch (e) { try { await w.abort(); } catch (_) {} throw e; }
-  const f = await fh.getFile(); if (f.size !== blob.size) throw new Error('size check failed');
-}
 async function sheetInfo(blobOrFile) {
   try { const wb = XLSX.read(await blobOrFile.arrayBuffer(), { type: 'array' }); return { wb, data: readDataSheet(wb) }; } catch (_) { return { wb: null, data: null }; }
 }
@@ -118,9 +210,84 @@ function initialsFromName(n) {
 }
 
 /* ---------------- step A: unpack ---------------- */
-async function unpackAll(zipDir, dest, R) {
+const COPIES_AT_ONCE = 6;     // photos copied at the same time: a network drive spends most of its time waiting, not copying
+const bit = (b, i) => (b[i >> 3] >> (i & 7)) & 1;
+const setBit = (b, i) => { b[i >> 3] |= 1 << (i & 7); };
+const DONE = { dirty: new Set() };
+async function loadBits(j) {
+  const rec = await hget(j.key, 'done');
+  try { if (rec && rec.n === j.ents.length && rec.dest && await rec.dest.isSameEntry(H.dest)) return rec.bits; } catch (_) {}
+  return new Uint8Array(Math.ceil(j.ents.length / 8));
+}
+async function flushDone() {
+  for (const j of [...DONE.dirty]) { DONE.dirty.delete(j); await hset(j.key, { dest: H.dest, n: j.ents.length, bits: j.bits, at: Date.now() }, 'done'); }
+}
+function markDone(j, i) { setBit(j.bits, i); DONE.dirty.add(j); }
+// One listing per folder (1.15.0), instead of asking the drive about every photo separately. names: file name ->
+// { h: handle } (size looked up only when needed), { size } once known, or { wait } while a copy is being written.
+function folderCache(root) {
+  const m = new Map();
+  const get = parts => {
+    const key = parts.join('/');
+    if (m.has(key)) return m.get(key);
+    const p = (async () => {
+      const parent = parts.length > 1 ? await get(parts.slice(0, -1)) : { h: root };
+      const h = await withConn(() => parent.h.getDirectoryHandle(parts[parts.length - 1], { create: true }), 'folder ' + key);
+      const names = new Map();
+      await withConn(async () => { names.clear(); for await (const [n, x] of h.entries()) if (x.kind === 'file') names.set(n, { h: x }); }, 'folder ' + key);
+      return { h, names, rel: key };
+    })();
+    m.set(key, p); p.catch(() => m.delete(key));
+    return p;
+  };
+  return get;
+}
+async function sizeOf(rec) {
+  if (rec.size != null) return rec.size;
+  if (rec.wait) { await rec.wait; return rec.size != null ? rec.size : -1; }
+  rec.size = await withConn(async () => { try { return (await rec.h.getFile()).size; } catch (e) { if (e.name === 'NotFoundError') return -1; throw e; } }, 'a file');
+  return rec.size;
+}
+async function writeBlob(dir, name, blob) {
+  const fh = await dir.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();      // written to a temporary file; it only gets its real name once complete
+  try { await w.write(blob); await w.close(); } catch (e) { try { await w.abort(); } catch (_) {} throw e; }
+  const f = await fh.getFile(); if (f.size !== blob.size) throw new Error('size check failed');
+}
+// one photo (or index file) from a ZIP. Never overwrites: same name and size = already there; same name, different
+// file = kept as "name (2)". Sizes checked or written in this run go into `known`, so the folder check needn't ask again.
+async function copyEntry(j, i, F, known, R) {
+  const en = j.ents[i], base = en.base;
+  if (bit(j.bits, i)) {
+    if (F.names.has(base)) { R.same++; return; }                         // copied (or found) by an earlier run, still there
+    if (en.pre) { en.pre = false; P.done -= en.usize; P.files--; }       // gone since (folder deleted or moved): copy it again
+  }
+  const dot = base.lastIndexOf('.'), stem = dot > 0 ? base.slice(0, dot) : base, ext = dot > 0 ? base.slice(dot) : '';
+  let target = base;
+  for (let k = 1; ;) {
+    const cand = k === 1 ? base : `${stem} (${k})${ext}`, rec = F.names.get(cand);
+    if (!rec) { target = cand; break; }
+    const sz = await sizeOf(rec);
+    if (F.names.get(cand) !== rec) continue;                             // changed while waiting: look again
+    if (sz < 0) { F.names.delete(cand); continue; }
+    if (sz === en.usize) { known.set(F.rel + '/' + cand, sz); markDone(j, i); R.same++; return; }
+    // an empty file is what an interrupted copy leaves (the browser creates the file before writing into it):
+    // there's no photo in it to lose, so it's filled in rather than kept beside a "(2)" copy
+    if (sz === 0) { target = cand; R.filled++; break; }
+    k++;
+  }
+  if (target !== base) R.conflicts.push(`${en.name}  →  ${target}`);
+  let ok; const rec = { wait: new Promise(r => { ok = r; }) }; F.names.set(target, rec);
+  try {
+    await withConn(async () => writeBlob(F.h, target, await entryStream(j.f, en)), en.name);
+    rec.size = en.usize; delete rec.wait;
+    known.set(F.rel + '/' + target, en.usize); markDone(j, i); R.added++; P.work += en.usize;
+  } catch (e) { if (F.names.get(target) === rec) F.names.delete(target); throw e; } finally { ok(); }
+}
+async function unpackAll(zipDir, dest, R, known, steps) {
+  phase({ step: `Step 1 of ${steps}: copying`, label: 'Reading the ZIPs', kind: 'files' });
   const zips = [];
-  for await (const [name, h] of zipDir.entries()) if (h.kind === 'file' && /\.zip$/i.test(name)) zips.push(await h.getFile());
+  await withConn(async () => { zips.length = 0; for await (const [name, h] of zipDir.entries()) if (h.kind === 'file' && /\.zip$/i.test(name)) zips.push(await h.getFile()); }, 'the ZIP folder');
   zips.sort((a, b) => a.name.localeCompare(b.name));
   // spreadsheet-only exports (no new photos) arrive as a bare .xlsx: file it in its project folder like the one inside a ZIP
   for await (let [name, h] of zipDir.entries()) {
@@ -130,7 +297,7 @@ async function unpackAll(zipDir, dest, R) {
     const root = safeName(d.project.number) + ' Inspection'; R.roots.add(root);
     const dd = new Date(d.exportedAt), p2 = n => String(n).padStart(2, '0');
     name = `${safeName(d.project.number)} ${dd.getFullYear()}-${p2(dd.getMonth() + 1)}-${p2(dd.getDate())} ${safeName(d.inspector || 'XX')} Defects.xlsx`;   // its standard name, even if it was renamed
-    const dir = await H.dest.getDirectoryHandle(root, { create: true });
+    const dir = await withConn(() => H.dest.getDirectoryHandle(root, { create: true }), root);
     const old = await fileIfExists(dir, name), od = old ? (await sheetInfo(old)).data : null;
     if (old && (old.size === f.size || (od && od.exportedAt >= d.exportedAt))) { R.same++; continue; }
     try { await writeBlob(dir, name, f); R.added++; log('  Added spreadsheet ' + name); } catch (e) { R.sheetNotes.push(`Not updated (is it open in Excel?): ${root}/${name}`); }
@@ -140,56 +307,72 @@ async function unpackAll(zipDir, dest, R) {
     try {
       const ents = (await readZip(f)).filter(e => !e.name.endsWith('/'));
       const roots = [...new Set(ents.map(e => e.name.split('/')[0]))];
-      if (roots.length === 1 && / Inspection$/.test(roots[0])) jobs.push({ f, ents, root: roots[0] });
+      if (roots.length === 1 && / Inspection$/.test(roots[0])) jobs.push({ f, ents, root: roots[0], key: `${f.name}|${f.size}|${f.lastModified}` });
       else log(`  Skipped ${f.name}: not a Site Defects export`, 'warn');
     } catch (e) { log(`  Skipped ${f.name}: ${e.message}`, 'warn'); }
   }
   if (!jobs.length) { if (!R.roots.size) log('No Site Defects export ZIPs or spreadsheets in that folder.', 'warn'); return; }
-  log(`Found ${jobs.length} export ZIP(s):`, 'h'); jobs.forEach(j => log('  ' + j.f.name));
-  const total = jobs.reduce((s, j) => s + j.ents.reduce((t, e) => t + e.usize, 0), 0); let done = 0;
+  // what's to do: photos first (several at a time), then each ZIP's spreadsheet (one at a time: newest wins)
+  const photos = [], sheets = [];
+  let total = 0, files = 0, done = 0, doneFiles = 0;
+  const rootThere = new Map();
   for (const j of jobs) {
     R.roots.add(j.root);
-    status('Unpacking ' + j.f.name); log('Unpacking ' + j.f.name + ' …');
-    const cache = new Map();
-    for (const en of j.ents) {
+    if (!rootThere.has(j.root)) rootThere.set(j.root, await withConn(async () => { try { await dest.getDirectoryHandle(j.root); return true; } catch (e) { if (e.name === 'NotFoundError' || e.name === 'TypeMismatchError') return false; throw e; } }, j.root));
+    j.bits = rootThere.get(j.root) ? await loadBits(j) : new Uint8Array(Math.ceil(j.ents.length / 8));   // project folder new (or deleted): start afresh
+    j.left = 0;
+    j.ents.forEach((en, i) => {
       const parts = en.name.split('/');
-      try {
-        if (parts.some(s => s === '' || s === '.' || s === '..')) throw new Error('unsafe name');
-        const dir = await subdir(dest, parts.slice(0, -1), cache);
-        const base = parts[parts.length - 1];
-        const isSheet = parts.length === 2 && /\.xlsx$/i.test(base);
-        const old = await fileIfExists(dir, base);
-        if (old && isSheet) {
-          if (old.size === en.usize) { R.same++; continue; }
-          // same spreadsheet name (one per inspector per day): keep whichever was exported last
-          const inc = await entryStream(j.f, en);
-          const a = (await sheetInfo(old)).data, b = (await sheetInfo(inc)).data;
-          const newer = a && b ? b.exportedAt > a.exportedAt : en.when > old.lastModified;
-          if (!newer) { R.same++; continue; }
-          try { await writeBlob(dir, base, inc); R.added++; } catch (e) { R.sheetNotes.push(`Not updated (is it open in Excel?): ${en.name}`); }
-          continue;
-        }
-        let target = base;
-        if (old) {
-          if (old.size === en.usize) { R.same++; done += en.usize; progress(done / total); continue; }
-          // same name, different file: keep both, never overwrite a photo
-          const dot = base.lastIndexOf('.'), stem = dot > 0 ? base.slice(0, dot) : base, ext = dot > 0 ? base.slice(dot) : '';
-          let k = 2, skip = false;
-          while (true) {
-            const cand = `${stem} (${k})${ext}`, f2 = await fileIfExists(dir, cand);
-            if (!f2) { target = cand; break; }
-            if (f2.size === en.usize) { skip = true; break; }
-            k++;
-          }
-          if (skip) { R.same++; done += en.usize; progress(done / total); continue; }
-          R.conflicts.push(`${en.name}  →  ${target}`);
-        }
-        await writeBlob(dir, target, await entryStream(j.f, en));
-        R.added++;
-      } catch (e) { R.failed.push(`${en.name} (${e.message})`); }
-      done += en.usize; progress(done / total);
-    }
+      en.parts = parts; en.base = parts[parts.length - 1];
+      total += en.usize; files++;
+      if (bit(j.bits, i)) { done += en.usize; doneFiles++; en.pre = true; }
+      j.left++;
+      (parts.length === 2 && /\.xlsx$/i.test(en.base) ? sheets : photos).push([j, i]);
+    });
   }
+  log(`Found ${jobs.length} export ZIP(s): ${num(files)} files, ${mb(total)}${doneFiles ? ` (${num(doneFiles)} files, ${mb(done)}, already copied by an earlier run)` : ''}`, 'h');
+  jobs.forEach(j => log('  ' + j.f.name));
+  phase({ step: `Step 1 of ${steps}: copying`, label: 'Copying photos', kind: 'bytes', total, done, filesTotal: files, files: doneFiles });
+  const getF = folderCache(dest);
+  const finished = (j, i, err) => {
+    const en = j.ents[i];
+    if (err) R.failed.push(`${en.name} (${err.message || err})`);
+    if (!en.pre) { P.done += en.usize; P.files++; }
+    if (--j.left === 0) log(`  ✓ ${j.f.name}`, 'ok');
+  };
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(COPIES_AT_ONCE, photos.length) }, async () => {
+    while (next < photos.length) {
+      const [j, i] = photos[next++], en = j.ents[i];
+      await gate();
+      try {
+        if (en.parts.some(s => s === '' || s === '.' || s === '..')) throw new Error('unsafe name');
+        await copyEntry(j, i, await getF(en.parts.slice(0, -1)), known, R);
+        finished(j, i);
+      } catch (e) { finished(j, i, e); }
+    }
+  }));
+  for (const [j, i] of sheets) {
+    const en = j.ents[i];
+    await gate();
+    try {
+      const F = await getF(en.parts.slice(0, -1)), base = en.base;
+      if (bit(j.bits, i) && F.names.has(base)) { R.same++; finished(j, i); continue; }
+      const old = await fileIfExists(F.h, base);
+      if (old && old.size === en.usize) { R.same++; markDone(j, i); finished(j, i); continue; }
+      const inc = await entryStream(j.f, en);
+      if (old) {
+        // same spreadsheet name (one per inspector per day): keep whichever was exported last
+        const a = (await sheetInfo(old)).data, b = (await sheetInfo(inc)).data;
+        const newer = a && b ? b.exportedAt > a.exportedAt : en.when > old.lastModified;
+        if (!newer) { R.same++; markDone(j, i); finished(j, i); continue; }
+      }
+      try { await writeBlob(F.h, base, inc); F.names.set(base, { size: en.usize }); R.added++; markDone(j, i); }
+      catch (e) { R.sheetNotes.push(`Not updated (is it open in Excel?): ${en.name}`); }
+      finished(j, i);
+    } catch (e) { finished(j, i, e); }
+  }
+  await flushDone();
 }
 
 /* ---------------- step B: newest spreadsheet per inspector ---------------- */
@@ -215,13 +398,50 @@ async function newestSheets(projDir, R) {
   return keep;
 }
 
-/* ---------------- step B2: one copy of each photo (1.9.2) ----------------
+/* ---------------- step B2: the project's photos, looked at once (1.15.0) ----------------
+   One pass through the Photos folder serves both the tidy-up below and the receipt (until 1.14.0 each walked the
+   whole folder separately). Several folders and files are looked at at the same time; files whose size was checked
+   or written earlier in this run aren't asked about again. */
+function limiter(n) {
+  let active = 0; const q = [];
+  const next = () => { if (active >= n || !q.length) return; active++; const [fn, res, rej] = q.shift(); fn().then(res, rej).finally(() => { active--; next(); }); };
+  return fn => new Promise((res, rej) => { q.push([fn, res, rej]); next(); });
+}
+async function previousReceiptCount(projDir, root) {
+  try {
+    const rd = await projDir.getDirectoryHandle('Receipts');
+    for await (const [name, h] of rd.entries()) if (h.kind === 'file' && name.startsWith(root.replace(/ Inspection$/, '') + ' receipt ') && name.endsWith('.json')) {
+      const d = JSON.parse(await (await h.getFile()).text()); if (d && Array.isArray(d.files)) return d.files.length;
+    }
+  } catch (_) {}
+  return 0;
+}
+async function scanPhotos(projDir, root, known) {
+  let photosDir = null; try { photosDir = await projDir.getDirectoryHandle('Photos'); } catch (_) { return []; }
+  const files = [], lim = limiter(8), rel0 = root + '/Photos';
+  async function walk(dir, rel) {
+    const kids = [];
+    await lim(() => withConn(async () => { kids.length = 0; for await (const [name, h] of dir.entries()) kids.push([name, h]); }, 'folder ' + rel));
+    await Promise.all(kids.map(async ([name, h]) => {
+      if (h.kind === 'directory') return walk(h, rel + '/' + name);
+      const k = known.get(rel0 + rel.slice('Photos'.length) + '/' + name);
+      const size = k != null ? k : await lim(() => withConn(async () => { try { return (await h.getFile()).size; } catch (e) { if (e.name === 'NotFoundError') return -1; throw e; } }, rel + '/' + name));
+      if (size >= 0) files.push({ dir, rel: rel + '/' + name, name, size });
+      P.done++; P.work++;
+    }));
+  }
+  await walk(photosDir, 'Photos');
+  files.sort((a, b) => a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
+  return files;
+}
+
+/* ---------------- step B3: one copy of each photo (1.9.2) ----------------
    A photo's folder can change after it was exported: an unlinked photo is exported loose in the unit folder and
    later linked to a condition (exported again into the component folder), linked to another component, or moved
    to another unit. The newest record of where each photo belongs (each export ZIP's "Photo index" file, and each
    inspector's newest spreadsheet) decides. Another copy is removed only when it has the same name and the same
    size as the copy in the right place, so nothing that isn't an exact duplicate is ever deleted. */
-async function tidyPhotos(projDir, sheets, R) {
+async function tidyPhotos(projDir, sheets, files, R) {
   const latest = new Map();   // photo name -> { path, size, at }
   const note = (name, path, size, at) => { if (!name || !/^Photos\//.test(path || '')) return; const o = latest.get(name); if (!o || at > o.at) latest.set(name, { path, size: +size || 0, at: +at || 0 }); };
   for (const s of sheets) if (s.data) for (const ph of s.data.photos || []) note(ph.name, ph.path, ph.size, s.data.exportedAt);
@@ -230,20 +450,10 @@ async function tidyPhotos(projDir, sheets, R) {
     if (h.kind !== 'file' || !/\.json$/i.test(name)) continue;
     try { const d = JSON.parse(await (await h.getFile()).text()); if (d && d.type === 'site-defects-photo-index') for (const ph of d.photos || []) note(ph.name, ph.path, ph.size, d.exportedAt); } catch (_) {}
   }
-  if (!latest.size) return 0;
-  let photosDir = null; try { photosDir = await projDir.getDirectoryHandle('Photos'); } catch (_) { return 0; }
+  const removed = new Set();
+  if (!latest.size) return removed;
   const copies = new Map();   // file name -> [{ dir, rel, size }]
-  async function walk(dir, rel) {
-    for await (const [name, h] of dir.entries()) {
-      if (h.kind === 'directory') { await walk(h, rel + '/' + name); continue; }
-      if (!latest.has(name)) continue;
-      const f = await h.getFile();
-      if (!copies.has(name)) copies.set(name, []);
-      copies.get(name).push({ dir, rel: rel + '/' + name, size: f.size });
-    }
-  }
-  await walk(photosDir, 'Photos');
-  let n = 0;
+  for (const c of files) { if (!latest.has(c.name)) continue; if (!copies.has(c.name)) copies.set(c.name, []); copies.get(c.name).push(c); }
   for (const [name, list] of copies) {
     if (list.length < 2) continue;
     const L = latest.get(name);
@@ -251,11 +461,11 @@ async function tidyPhotos(projDir, sheets, R) {
     if (!keep) continue;                                            // the right copy isn't here yet: leave everything
     for (const c of list) {
       if (c === keep || c.size !== keep.size) continue;
-      try { await c.dir.removeEntry(name); n++; log(`  Tidied: ${c.rel} (now in ${L.path.replace(/\/[^/]+$/, '')})`); }
+      try { await withConn(() => c.dir.removeEntry(name), c.rel); removed.add(c); log(`  Tidied: ${c.rel} (now in ${L.path.replace(/\/[^/]+$/, '')})`); }
       catch (e) { R.failed.push(`${c.rel} (old copy not removed: ${e.message})`); }
     }
   }
-  return n;
+  return removed;
 }
 
 /* ---------------- step C: the combined spreadsheet ---------------- */
@@ -347,55 +557,57 @@ function buildCombinedModel(sheets, resolutions, now) {
 }
 
 /* ---------------- step D: receipt ---------------- */
-async function receipt(projDir, root, R) {
-  const files = [];
-  let photosDir = null; try { photosDir = await projDir.getDirectoryHandle('Photos'); } catch (_) {}
-  async function walk(dir, rel) {
-    for await (const [name, h] of dir.entries()) {
-      if (h.kind === 'directory') await walk(h, rel + '/' + name);
-      else { const f = await h.getFile(); files.push({ p: rel + '/' + name, s: f.size }); }
-    }
-  }
-  if (photosDir) await walk(photosDir, 'Photos');
+async function receipt(projDir, root, files) {
   const now = Date.now();
-  const body = JSON.stringify({ type: 'site-defects-receipt', version: 1, root, created: new Date(now - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 19), computer: 'Combine page', files });
+  const body = JSON.stringify({ type: 'site-defects-receipt', version: 1, root, created: new Date(now - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 19), computer: 'Combine page', files: files.map(f => ({ p: f.rel, s: f.size })) });
   const rname = `${root.replace(/ Inspection$/, '')} receipt ${stamp(now)}.json`;
   const blob = new Blob([body], { type: 'application/json' });
   async function put(dir, label) {
-    for await (const [name, h] of dir.entries()) if (h.kind === 'file' && name.startsWith(root.replace(/ Inspection$/, '') + ' receipt ') && name.endsWith('.json')) { try { await dir.removeEntry(name); } catch (_) {} }
-    await writeBlob(dir, rname, blob);
+    const old = [];
+    for await (const [name, h] of dir.entries()) if (h.kind === 'file' && name !== rname && name.startsWith(root.replace(/ Inspection$/, '') + ' receipt ') && name.endsWith('.json')) old.push(name);
+    await writeBlob(dir, rname, blob);      // the new receipt first, then the old ones go: there's always one
+    for (const name of old) { try { await dir.removeEntry(name); } catch (_) {} }
     log(`  Receipt: ${label}\\${rname}`);
   }
-  await put(await projDir.getDirectoryHandle('Receipts', { create: true }), root + '\\Receipts');
+  await withConn(async () => put(await projDir.getDirectoryHandle('Receipts', { create: true }), root + '\\Receipts'), 'the receipt');
   if (H.rcpt) { try { await put(H.rcpt, H.rcpt.name); } catch (e) { log('  Couldn’t copy the receipt to ' + H.rcpt.name + ': ' + e.message, 'warn'); } }
   return files.length;
 }
 
 /* ---------------- run ---------------- */
 async function run() {
-  $('#go').disabled = true; $('#log').innerHTML = ''; progress(0);
-  const R = { roots: new Set(), added: 0, same: 0, conflicts: [], failed: [], sheetNotes: [], removedSheets: 0 };
+  if (C.running) return;
+  C.running = true; C.paused = false; C.t0 = Date.now(); showButtons();
+  $('#log').innerHTML = ''; progress(0); detail('');
+  const R = { roots: new Set(), added: 0, same: 0, filled: 0, conflicts: [], failed: [], sheetNotes: [], removedSheets: 0 };
+  const known = new Map();      // "<project folder>/Photos/…/name" -> size, checked or written in this run
+  let finishedOk = false;
   try {
     if (!await permit(H.dest, 'readwrite')) { log('Permission to write to the project folder was not given.', 'err'); return; }
     if (H.rcpt && !await permit(H.rcpt, 'readwrite')) { log('No permission for the receipt folder: the receipt will only be written in the project folder.', 'warn'); H.rcpt = null; }
+    keepAwake(); await saveSession();
+    const steps = H.zip ? 3 : 2;
     if (H.zip) {
       if (!await permit(H.zip, 'read')) { log('Permission to read the ZIP folder was not given.', 'err'); return; }
-      await unpackAll(H.zip, H.dest, R);
+      await unpackAll(H.zip, H.dest, R, known, steps);
     }
     // projects to (re)build: the ones just unpacked, or every project folder at the destination
-    if (!R.roots.size) for await (const [name, h] of H.dest.entries()) if (h.kind === 'directory' && / Inspection$/.test(name)) R.roots.add(name);
+    if (!R.roots.size) await withConn(async () => { for await (const [name, h] of H.dest.entries()) if (h.kind === 'directory' && / Inspection$/.test(name)) R.roots.add(name); }, 'the project folder');
     if (H.dest.name && / Inspection$/.test(H.dest.name) && !R.roots.size) log('Tip: choose the folder that CONTAINS the “… Inspection” folder, not the Inspection folder itself.', 'warn');
-    if (!R.roots.size) { log('No project folders (“… Inspection”) found there.', 'warn'); status(''); return; }
+    if (!R.roots.size) { log('No project folders (“… Inspection”) found there.', 'warn'); finishedOk = true; return; }
     for (const root of R.roots) {
       log(''); log(root, 'h');
-      status('Building ' + root);
-      const projDir = await H.dest.getDirectoryHandle(root, { create: true });
-      const sheets = await newestSheets(projDir, R);
-      const tidied = await tidyPhotos(projDir, sheets, R);
-      if (tidied) log(`  Removed ${tidied} old cop${tidied === 1 ? 'y' : 'ies'} of photos that changed folder, so each photo is in one folder.`);
+      const projDir = await withConn(() => H.dest.getDirectoryHandle(root, { create: true }), root);
+      phase({ step: `Step ${steps - 1} of ${steps}: checking the project folder`, label: root, kind: 'files' });
+      const sheets = await withConn(() => newestSheets(projDir, R), 'the spreadsheets');
+      P.total = (await previousReceiptCount(projDir, root)) + R.added;
+      const files = await scanPhotos(projDir, root, known);
+      const removed = await tidyPhotos(projDir, sheets, files, R);
+      if (removed.size) log(`  Removed ${removed.size} old cop${removed.size === 1 ? 'y' : 'ies'} of photos that changed folder, so each photo is in one folder.`);
+      phase({ step: `Step ${steps} of ${steps}: building the combined spreadsheet`, label: root + ' (usually a minute or two)', kind: 'files' });
+      await sleep(50);   // let the page show the step before the work starts
       const usable = sheets.filter(s => s.data);
       for (const s of sheets.filter(s => !s.data)) log(`  ${s.name} was made before app version 1.8.0, so it can’t be combined. Export again from that inspector’s app (version 1.8.0 or later).`, 'warn');
-      let summary = '';
       if (usable.length) {
         const number = safeName(usable.sort((a, b) => b.at - a.at)[0].data.project.number);
         const combinedName = `${number} Combined Defects.xlsx`;
@@ -405,9 +617,8 @@ async function run() {
         const wb = buildWorkbookFromModel(model);
         const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
         try {
-          await writeBlob(projDir, combinedName, new Blob([out]));
+          await withConn(() => writeBlob(projDir, combinedName, new Blob([out])), combinedName);
           const un = model.conflicts.filter(c => c.status === 'Unresolved').length, rs = model.conflicts.length - un;
-          summary = `${model.meta.inspectors.length} inspector(s), ${model.photos.length} photos`;
           log(`  Combined spreadsheet: ${combinedName}  (${model.meta.inspectors.join(', ')})`, 'ok');
           log(`  Conflicts: ${un} unresolved${rs ? `, ${rs} resolved` : ''}${un ? '  → see the Conflicts sheet' : ''}`, un ? 'warn' : 'ok');
           const ch = model.changeLog.filter(e => e.change !== 'Added').length;
@@ -416,30 +627,48 @@ async function run() {
           R.sheetNotes.push(`${combinedName} could not be written (is it open in Excel?). Close it and click Combine again.`);
         }
       }
-      const n = await receipt(projDir, root, R);
-      log(`  Photos in the folder: ${n}${summary ? '' : ''}`);
+      const n = await receipt(projDir, root, files.filter(f => !removed.has(f)));
+      log(`  Photos in the folder: ${n}`);
+      const empty = files.filter(f => !f.size && !removed.has(f));
+      if (empty.length) { log(`  ${empty.length} empty file(s), left by a copy that was cut off. Put the ZIPs they came from in the ZIP folder and click Combine: they’re filled in. Until then the phones keep those photos.`, 'warn'); empty.slice(0, 20).forEach(f => log('    ' + f.rel, 'warn')); }
     }
     log('');
-    log(`Done. ${R.added} new file(s) added, ${R.same} already there.`, 'ok');
+    log(`Done in ${dur((Date.now() - C.t0) / 1000)}. ${R.added} new file(s) added, ${R.same} already there.`, 'ok');
+    if (R.filled) log(`${R.filled} empty file(s) left by an earlier copy that was cut off were filled in.`, 'ok');
     if (R.conflicts.length) { log(`${R.conflicts.length} file(s) had the same name as a different file already there. Both were kept:`, 'warn'); R.conflicts.forEach(c => log('  ' + c, 'warn')); }
     if (R.sheetNotes.length) { log('Spreadsheets (photos and the receipt are not affected):', 'warn'); R.sheetNotes.forEach(c => log('  ' + c, 'warn')); }
     if (R.failed.length) { log(`${R.failed.length} file(s) could not be unpacked. They are NOT in the receipt, so the phones keep them:`, 'err'); R.failed.forEach(c => log('  ' + c, 'err')); }
     log('Next: inspectors load the newest receipt in the app (Menu → Load PC receipt).');
-    status('Done'); progress(1);
+    finishedOk = true;
   } catch (e) {
-    log('Stopped: ' + (e && e.message || e), 'err'); status('Stopped');
-  } finally { $('#go').disabled = !H.dest; }
+    log('Stopped: ' + (e && e.message || e), 'err');
+    log('Click Combine to try again: what was already copied is kept and skipped.', 'warn');
+  } finally {
+    await flushDone();
+    C.running = false; C.paused = false; releaseWake();
+    if (finishedOk) { await hset('unfinished', null); S0.unfinished = null; status('Done'); detail(''); progress(1); }
+    else { S0.unfinished = await hget('unfinished'); status('Stopped'); }
+    showButtons(); showUnfinished();
+  }
 }
 
 /* ---------------- start ---------------- */
+function showUnfinished() {
+  const u = S0.unfinished, el = $('#resumeNote');
+  if (!u) { el.classList.add('hidden'); return; }
+  const when = new Date(u.at).toLocaleString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  el.innerHTML = `<b>A combine didn’t finish</b> (stopped ${when}${u.filesTotal ? `, ${num(u.files)} of ${num(u.filesTotal)} files copied` : ''}). Click <b>Resume</b> with the same folders to carry on: files already copied are skipped.`;
+}
 (async () => {
   if (!window.showDirectoryPicker) { $('#unsupported').classList.remove('hidden'); document.querySelectorAll('button').forEach(b => b.disabled = true); return; }
   H.zip = await hget('zip'); H.dest = await hget('dest'); H.rcpt = await hget('rcpt');
-  showChosen();
+  S0.unfinished = await hget('unfinished');
+  showChosen(); showUnfinished();
   $('#zipPick').onclick = () => pick('zip', 'read');
   $('#destPick').onclick = () => pick('dest', 'readwrite');
   $('#rcptPick').onclick = () => pick('rcpt', 'readwrite');
   $('#zipClear').onclick = async () => { H.zip = null; await hset('zip', null); showChosen(); };
   $('#rcptClear').onclick = async () => { H.rcpt = null; await hset('rcpt', null); showChosen(); };
-  $('#go').onclick = run;
+  $('#go').onclick = () => C.running ? resumeNow() : run();
+  $('#pause').onclick = () => pauseNow();
 })();

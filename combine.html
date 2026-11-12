@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Site Defects – Combine</title>
-<meta name="app-version" content="1.14.0">
+<meta name="app-version" content="1.15.0">
 <link rel="icon" href="icon-sgh-gradient-192.png">
 <style>
   :root { --ink: #15201C; --muted: #5C6964; --line: #CDD5D1; --paper: #F3F5F4; --card: #fff; --accent: #2C6BED; --red: #C8102E; --green: #1E7B4A; --amber: #C77700; }
@@ -27,6 +27,8 @@
   #bar { height: 8px; background: var(--paper); border-radius: 4px; overflow: hidden; margin: 12px 0 6px; }
   #bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
   #status { font-weight: 600; }
+  #detail { color: var(--muted); font-size: 14px; min-height: 1.45em; margin: 0; }
+  .resume { background: #EAF1FE; border: 1px solid #B9CEF8; border-radius: 9px; padding: 9px 12px; font-size: 14px; margin: 0 0 12px; }
   #log { font-family: Consolas, monospace; font-size: 13px; background: #0E1412; color: #E8EEEB; border-radius: 10px; padding: 12px 14px; max-height: 420px; overflow: auto; white-space: pre-wrap; margin-top: 10px; }
   #log .ok { color: #7BD89B; } #log .warn { color: #F2C14E; } #log .err { color: #FF7A85; } #log .h { color: #9EC1FF; font-weight: bold; }
   .unsupported { background: #FFF2CC; border-color: #BF9000; }
@@ -40,13 +42,13 @@
 
   <div class="card">
     <h2><span class="num">1</span> Folder with the new ZIPs <span class="note">(optional)</span></h2>
-    <p class="note">The folder you copied the export ZIPs into (from USB drives, OneDrive or email). ZIPs already combined are skipped quickly. Leave empty to just rebuild the combined spreadsheet, for example after resolving conflicts.</p>
+    <p class="note">The folder you copied the export ZIPs into (from USB drives, OneDrive or email). ZIPs already combined are skipped quickly. For speed, keep this folder on this PC (not on a USB drive). Leave empty to just rebuild the combined spreadsheet, for example after resolving conflicts.</p>
     <div class="row"><span class="chosen empty" id="zipName">Not chosen</span><button id="zipPick">Choose…</button><button class="link hidden" id="zipClear">Clear</button></div>
   </div>
 
   <div class="card">
     <h2><span class="num">2</span> Where the combined project folder lives</h2>
-    <p class="note">The folder that holds (or will hold) the project folder, for example <b>I:\Projects\267180.00</b> or <b>C:\Inspections</b>. The project folder “267180.00 Inspection” is created inside it. Always use the same place for a project.</p>
+    <p class="note">The folder that holds (or will hold) the project folder, for example <b>I:\Projects\267180.00</b> or <b>C:\Inspections</b>. The project folder “267180.00 Inspection” is created inside it. Always use the same place for a project. A folder on this PC (not synced by OneDrive) combines much faster than the I: drive; copy the project folder to the I: drive afterwards if that’s where it’s kept.</p>
     <div class="row"><span class="chosen empty" id="destName">Not chosen</span><button id="destPick">Choose…</button></div>
   </div>
 
@@ -57,9 +59,11 @@
   </div>
 
   <div class="card">
-    <div class="row"><button class="primary" id="go" disabled>Combine</button><span id="status"></span></div>
+    <p class="resume hidden" id="resumeNote"></p>
+    <div class="row"><button class="primary" id="go" disabled>Combine</button><button class="hidden" id="pause">Pause</button><span id="status"></span></div>
     <div id="bar"><span></span></div>
-    <p class="note">Close the combined spreadsheet in Excel before you start. Keep this tab open until it says Done.</p>
+    <p id="detail"></p>
+    <p class="note">Close the combined spreadsheet in Excel before you start. <b>Pause</b> stops safely at any time: Resume carries on, and so does clicking Combine later (even after closing this tab or losing the connection), skipping what’s already copied. While it runs, the PC is kept from going to sleep (closing the lid still sleeps it).</p>
     <div id="log" class="hidden"></div>
   </div>
 </main>
